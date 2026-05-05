@@ -98,8 +98,10 @@ Full guide: [docs/INSTALL.md](docs/INSTALL.md)
 ## Privacy posture
 
 - Postcode prefix (first 3 digits) only. No exact location. No NMI. No appliance-level data.
+- Anonymous household identifier (UUID v4 by default) generated locally during setup. No name, email or address is collected.
 - Data is published under CC-BY-4.0.
 - You can withdraw at any time by raising an issue to request data removal from historical cohort files.
+- **Full threat model, attribution leak disclosure for v0.1-v0.4 direct-commit phase, planned v0.5 relay architecture, and k-anonymity guardrails for the public dashboard: [docs/PRIVACY.md](docs/PRIVACY.md).**
 - Security model: [docs/SECURITY.md](docs/SECURITY.md)
 
 ---
