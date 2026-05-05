@@ -54,23 +54,19 @@ jobs:
           echo "base=$BASE" >> $GITHUB_OUTPUT
 
       # ------------------------------------------------------------------
-      # Step: Path-scope enforcement
+      # Step: Path-scope enforcement (structural)
+      #
+      # NOTE (v0.4+): household_id is an opaque UUID intentionally unrelated
+      # to the GitHub login (see docs/PRIVACY.md), so we no longer bind the
+      # path to the pusher's username. This check just enforces that records
+      # land in a non-empty subdirectory under data/raw/<id>/..., which
+      # catches accidental writes to the repo root or to data/raw/ itself.
       # ------------------------------------------------------------------
-      - name: Enforce path scope (household can only write to their own folder)
+      - name: Enforce path scope (records must live under data/raw/<id>/...)
         id: path_scope
         run: |
           python3 - <<'PYEOF'
           import os, sys
-
-          event = os.environ.get("GITHUB_EVENT_NAME", "")
-          if event == "pull_request":
-              login = os.environ.get("PR_LOGIN", "").strip().lower()
-          else:
-              login = os.environ.get("PUSHER_LOGIN", "").strip().lower()
-
-          if not login:
-              print("WARNING: Could not determine actor login. Skipping path-scope check.")
-              sys.exit(0)
 
           changed_raw = os.environ.get("CHANGED_FILES", "").strip()
           if not changed_raw:
@@ -79,41 +75,40 @@ jobs:
 
           changed_files = [p.strip() for p in changed_raw.splitlines() if p.strip()]
           violations = []
-          allowed_prefix = f"data/raw/{login}/"
 
           for path in changed_files:
               if not path.startswith("data/raw/"):
                   continue
               if path in ("data/raw/.gitkeep",):
                   continue
-              if not path.startswith(allowed_prefix):
+              # Must be data/raw/<non-empty-id>/<something>
+              parts = path.split("/")
+              if len(parts) < 4 or not parts[2]:
                   violations.append(path)
+                  continue
 
           if violations:
-              print(f"PATH SCOPE VIOLATION: user '{login}' attempted to write to:")
+              print("PATH SCOPE VIOLATION: the following paths are not under data/raw/<id>/...:")
               for v in violations:
                   print(f"  {v}")
-              print(f"\nThis token can only write to data/raw/{login}/**")
+              print("\nRecords must live under data/raw/<household_id>/<year>/<month>/<day>.jsonl")
               sys.exit(1)
           else:
-              print(f"Path scope OK: all {len(changed_files)} changed path(s) are under data/raw/{login}/")
+              print(f"Path scope OK: all {len(changed_files)} changed path(s) are correctly nested under data/raw/<id>/")
           PYEOF
         env:
           CHANGED_FILES: ${{ steps.changed_files.outputs.changed_files }}
-          PR_LOGIN: ${{ github.event.pull_request.user.login }}
-          PUSHER_LOGIN: ${{ github.event.pusher.name }}
 
       - name: Post path-scope violation comment to PR
         if: failure() && steps.path_scope.outcome == 'failure' && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
-            const login = context.payload.pull_request.user.login;
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `:red_circle: **Path scope violation**: this token can only write to \`data/raw/${login}/**\`. Your PR contains changes outside that path. Please update your PR to only include files under your own household folder.`
+              body: `:red_circle: **Path scope violation**: telemetry records must be written under \`data/raw/<household_id>/<year>/<month>/<day>.jsonl\`. Your PR contains paths outside that structure.`
             });
 
       # ------------------------------------------------------------------
