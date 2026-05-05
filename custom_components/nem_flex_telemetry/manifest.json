@@ -1,7 +1,7 @@
 {
   "domain": "nem_flex_telemetry",
   "name": "NEM Flex Telemetry",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "documentation": "https://github.com/purcell-lab/nem-flex-telemetry/blob/main/docs/INSTALL.md",
   "issue_tracker": "https://github.com/purcell-lab/nem-flex-telemetry/issues",
   "codeowners": ["@purcell-lab"],

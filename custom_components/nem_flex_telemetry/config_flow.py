@@ -138,7 +138,10 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._discovery_candidates: dict[str, list[str]] = {}
         self._unmapped_entities: list[str] = []
         self._is_reauth: bool = False
-        self._reauth_entry_id: str | None = None
+        # Note: cannot use ``_reauth_entry_id`` because recent Home Assistant
+        # versions expose that name as a read-only property on the base
+        # ``ConfigFlow`` class. Use a distinct attribute name here.
+        self._reauth_entry_ref: str | None = None
 
     # -----------------------------------------------------------------------
     # Step 1: Landing page
@@ -480,9 +483,9 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._data.update(user_input)
                 self._data[CONF_CONSENT_TIMESTAMP] = datetime.now(tz=UTC).isoformat()
 
-                if self._is_reauth and self._reauth_entry_id:
+                if self._is_reauth and self._reauth_entry_ref:
                     existing = self.hass.config_entries.async_get_entry(
-                        self._reauth_entry_id
+                        self._reauth_entry_ref
                     )
                     if existing:
                         self.hass.config_entries.async_update_entry(
@@ -490,7 +493,7 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             data={**existing.data, CONF_TOKEN: self._data[CONF_TOKEN]},
                         )
                         await self.hass.config_entries.async_reload(
-                            self._reauth_entry_id
+                            self._reauth_entry_ref
                         )
                     return self.async_abort(reason="reauth_successful")
 
@@ -553,7 +556,7 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._data.update(entry_data)
         for entry in self.hass.config_entries.async_entries(DOMAIN):
             if entry.data.get(CONF_GITHUB_LOGIN) == entry_data.get(CONF_GITHUB_LOGIN):
-                self._reauth_entry_id = entry.entry_id
+                self._reauth_entry_ref = entry.entry_id
                 break
         return await self.async_step_reauth_confirm()
 
