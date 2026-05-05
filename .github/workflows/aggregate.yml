@@ -4,8 +4,10 @@ on:
   # Run every hour
   schedule:
     - cron: "5 * * * *"
-  # Run on pushes to data/raw/**
+  # Run on pushes to main that touch data/raw/**
   push:
+    branches:
+      - main
     paths:
       - "data/raw/**"
   # Allow manual trigger
@@ -24,8 +26,8 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
-          # Use a PAT so the commit-back step triggers Pages deployment
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
