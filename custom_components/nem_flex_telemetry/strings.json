@@ -78,7 +78,7 @@
       }
     },
     "progress": {
-      "waiting_for_user": "Waiting for GitHub authorisation..."
+      "waiting_for_user": "1. Open https://github.com/login/device\n2. Enter the code: **{user_code}**\n3. Approve access for NEM Flex Telemetry\n\nThis window will continue automatically once you approve."
     },
     "error": {
       "device_flow_expired": "The code expired before authorisation. Please try again.",
