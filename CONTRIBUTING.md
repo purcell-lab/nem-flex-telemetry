@@ -9,11 +9,12 @@ Thank you for contributing. This document covers four paths: adding a household,
 The primary contribution is participating as a data-contributing household. Follow [docs/INSTALL.md](docs/INSTALL.md) for the full guide.
 
 In short:
-1. Create a GitHub fine-grained PAT with `contents:write` on this repo.
-2. Add this repo as a HACS custom integration source.
-3. Install and configure the "NEM Flex Telemetry" integration.
-4. Opt in to CC-BY-4.0 data licence and cohort participation.
-5. Verify data flows to `data/raw/<your-household-id>/`.
+1. Add this repo as a HACS custom integration source.
+2. Install and configure the "NEM Flex Telemetry" integration.
+3. Authorise via GitHub Device Flow when prompted. No tokens to manage.
+4. Confirm your HAEO entity mapping (usually auto-detected).
+5. Opt in to CC-BY-4.0 data licence and cohort participation.
+6. Verify data flows to `data/raw/<your-household-id>/`.
 
 If you hit any issues, open a GitHub Issue tagged `[install]`.
 
@@ -21,7 +22,7 @@ If you hit any issues, open a GitHub Issue tagged `[install]`.
 
 ## How to propose schema changes
 
-The 12-field schema in [SCHEMA.md](SCHEMA.md) and [schema/telemetry.schema.json](schema/telemetry.schema.json) is the contract between all contributing households. Changes to it must be backward-compatible or versioned.
+The schema is now at **v1.1** (13 fields, added `price_export_seen`). It is defined in [SCHEMA.md](SCHEMA.md) and [schema/telemetry.schema.json](schema/telemetry.schema.json). Changes to it must be backward-compatible or versioned.
 
 **RFC process:**
 
@@ -40,6 +41,8 @@ The 12-field schema in [SCHEMA.md](SCHEMA.md) and [schema/telemetry.schema.json]
    - A migration note in SCHEMA.md under a new `### Migration` heading
 5. Two approvals required before merge.
 
+**Entity mapping contributions:** If your HAEO instance uses entity names not listed as defaults in `const.py`'s `DEFAULT_HAEO_ENTITIES`, please open a PR adding them to the fallback lists with a note of which integration or HAEO version they come from. Contributions for EMHASS, Sigenergy, SolarEdge, and other optimiser integrations are welcome.
+
 ---
 
 ## How to contribute dashboard views
@@ -56,7 +59,7 @@ To add or improve a chart:
 4. Open a PR with a screenshot of the new view.
 
 Dashboard design constraints:
-- Use the colour palette: INK `#0E1416`, TEAL `#4FB3BF`, RUST `#D78562`, GOLD `#E8B254`, PAPER `#F2EFE7`.
+- Use the colour palette: INK `#0E1416`, TEAL `#4FB3BF`, RUST `#D78562`, GOLD `#E8B254`, PAPER `#F2EFE7`, RED `#E05252` (negative FiT highlights only).
 - No build step, no node_modules, no bundlers. Observable Plot and Tailwind from CDN only.
 - All new views must have a corresponding derived JSON file in `site/data/` produced by `scripts/aggregate.py`.
 
@@ -68,12 +71,12 @@ General code contributions (integration bug fixes, aggregation improvements, new
 
 1. Fork and create a branch named `fix/<description>` or `feat/<description>`.
 2. Write type-annotated Python. Use `async` where applicable.
-3. Follow existing patterns (ConfigEntry, DataUpdateCoordinator, async executor for blocking I/O).
+3. Follow existing patterns (ConfigEntry, DataUpdateCoordinator, async aiohttp for GitHub I/O).
 4. Add or update comments explaining non-obvious logic.
 5. Test against a local Home Assistant instance if possible.
 6. Open a PR. One approval required for minor fixes, two for substantive changes.
 
-No formal test suite yet (v0.1). PRs adding pytest coverage are very welcome.
+No formal test suite yet (v0.2). PRs adding pytest coverage are very welcome.
 
 ---
 

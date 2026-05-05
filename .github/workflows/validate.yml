@@ -4,6 +4,11 @@ on:
   pull_request:
     paths:
       - "data/raw/**"
+  push:
+    branches:
+      - main
+    paths:
+      - "data/raw/**"
   # Allow manual trigger for testing
   workflow_dispatch:
 
@@ -20,6 +25,8 @@ jobs:
     steps:
       - name: Checkout PR branch
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -29,23 +36,173 @@ jobs:
       - name: Install jsonschema
         run: pip install jsonschema
 
-      - name: Find changed JSONL files
+      - name: Find changed paths under data/raw/**
         id: changed_files
         run: |
-          # Get list of JSONL files changed in this PR
-          git fetch origin ${{ github.base_ref }}
-          CHANGED=$(git diff --name-only origin/${{ github.base_ref }} HEAD -- 'data/raw/**/*.jsonl' || true)
+          # Determine the diff base: PR base ref or push parent commit
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+          fi
+          # Fallback if before is all-zeros (first push to branch)
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            BASE=$(git rev-list --max-parents=0 HEAD)
+          fi
+          CHANGED=$(git diff --name-only "$BASE" HEAD -- 'data/raw/**' || true)
           echo "changed_files<<EOF" >> $GITHUB_OUTPUT
           echo "$CHANGED" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
+          echo "base=$BASE" >> $GITHUB_OUTPUT
 
-      - name: Validate changed JSONL files
+      # ------------------------------------------------------------------
+      # Step: Path-scope enforcement
+      # Every changed path under data/raw/** must be exactly
+      #   data/raw/<author-login>/<anything>
+      # where <author-login> is the GitHub login of the PR author (for PRs)
+      # or the pusher login (for direct pushes to main from household forks).
+      # ------------------------------------------------------------------
+      - name: Enforce path scope (household can only write to their own folder)
+        id: path_scope
+        run: |
+          python3 - <<'PYEOF'
+          import os, sys
+
+          # Determine the authorised login
+          event = os.environ.get("GITHUB_EVENT_NAME", "")
+          if event == "pull_request":
+              login = os.environ.get("PR_LOGIN", "").strip().lower()
+          else:
+              login = os.environ.get("PUSHER_LOGIN", "").strip().lower()
+
+          if not login:
+              print("WARNING: Could not determine actor login. Skipping path-scope check.")
+              sys.exit(0)
+
+          changed_raw = os.environ.get("CHANGED_FILES", "").strip()
+          if not changed_raw:
+              print("No changed files under data/raw/**. Nothing to check.")
+              sys.exit(0)
+
+          changed_files = [p.strip() for p in changed_raw.splitlines() if p.strip()]
+          violations = []
+          allowed_prefix = f"data/raw/{login}/"
+
+          for path in changed_files:
+              # Only enforce for paths under data/raw/
+              if not path.startswith("data/raw/"):
+                  continue
+              # Allow data/raw/.gitkeep (repo scaffolding)
+              if path in ("data/raw/.gitkeep",):
+                  continue
+              if not path.startswith(allowed_prefix):
+                  violations.append(path)
+
+          if violations:
+              print(f"PATH SCOPE VIOLATION: user '{login}' attempted to write to:")
+              for v in violations:
+                  print(f"  {v}")
+              print(f"\nThis token can only write to data/raw/{login}/**")
+              print("Your commit has been rejected. Each household may only write to their own folder.")
+              sys.exit(1)
+          else:
+              print(f"Path scope OK: all {len(changed_files)} changed path(s) are under data/raw/{login}/")
+          PYEOF
+        env:
+          CHANGED_FILES: ${{ steps.changed_files.outputs.changed_files }}
+          PR_LOGIN: ${{ github.event.pull_request.user.login }}
+          PUSHER_LOGIN: ${{ github.event.pusher.name }}
+
+      - name: Post path-scope violation comment to PR
+        if: failure() && steps.path_scope.outcome == 'failure' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const login = context.payload.pull_request.user.login;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `:red_circle: **Path scope violation**: this token can only write to \`data/raw/${login}/**\`. Your PR contains changes outside that path. Please update your PR to only include files under your own household folder.`
+            });
+
+      # ------------------------------------------------------------------
+      # Step: Date range enforcement
+      # Records must not be backdated more than 7 days.
+      # Records must not be post-dated into the future.
+      # ------------------------------------------------------------------
+      - name: Enforce record date range (max 7 days backdating, no future records)
+        id: date_check
+        run: |
+          python3 - <<'PYEOF'
+          import json, sys, os
+          from pathlib import Path
+          from datetime import UTC, datetime, timedelta
+
+          changed_raw = os.environ.get("CHANGED_FILES", "").strip()
+          if not changed_raw:
+              print("No changed files. Skipping date check.")
+              sys.exit(0)
+
+          changed_files = [p.strip() for p in changed_raw.splitlines() if p.strip()]
+          jsonl_files = [p for p in changed_files if p.endswith(".jsonl")]
+
+          now_utc = datetime.now(tz=UTC)
+          cutoff_past = now_utc - timedelta(days=7)
+          errors_found = 0
+
+          for filepath in jsonl_files:
+              path = Path(filepath)
+              if not path.exists():
+                  continue
+              with path.open() as f:
+                  for line_num, line in enumerate(f, 1):
+                      line = line.strip()
+                      if not line:
+                          continue
+                      try:
+                          record = json.loads(line)
+                      except json.JSONDecodeError:
+                          continue
+                      ts_raw = record.get("interval_start_utc", "")
+                      if not ts_raw:
+                          continue
+                      try:
+                          ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                      except ValueError:
+                          print(f"ERROR {filepath}:{line_num}: Cannot parse interval_start_utc: {ts_raw!r}")
+                          errors_found += 1
+                          continue
+                      if ts < cutoff_past:
+                          print(
+                              f"ERROR {filepath}:{line_num}: interval_start_utc {ts_raw!r} is "
+                              f"more than 7 days in the past (cutoff: {cutoff_past.isoformat()})"
+                          )
+                          errors_found += 1
+                      elif ts > now_utc + timedelta(minutes=10):
+                          print(
+                              f"ERROR {filepath}:{line_num}: interval_start_utc {ts_raw!r} is "
+                              f"in the future (now: {now_utc.isoformat()})"
+                          )
+                          errors_found += 1
+
+          if errors_found:
+              print(f"\nDATE CHECK FAILED: {errors_found} record(s) outside allowed range.")
+              sys.exit(1)
+          else:
+              print(f"Date check passed for {len(jsonl_files)} JSONL file(s).")
+          PYEOF
+        env:
+          CHANGED_FILES: ${{ steps.changed_files.outputs.changed_files }}
+
+      # ------------------------------------------------------------------
+      # Step: JSON Schema validation
+      # ------------------------------------------------------------------
+      - name: Validate changed JSONL files against schema v1.1
         id: validate
         run: |
-          python - <<'PYEOF'
-          import json
-          import sys
-          import os
+          python3 - <<'PYEOF'
+          import json, sys, os
           from pathlib import Path
 
           try:
@@ -68,7 +225,6 @@ jobs:
           changed_files = [p.strip() for p in changed_raw.splitlines() if p.strip()]
 
           if not changed_files:
-              # Validate all JSONL files if no specific list
               changed_files = list(str(p) for p in Path("data/raw").rglob("*.jsonl"))
 
           errors_found = 0
@@ -97,7 +253,7 @@ jobs:
                           errors_found += len(errs)
                       records_validated += 1
 
-          print(f"Validated {records_validated} records across {len(changed_files)} files.")
+          print(f"Validated {records_validated} records across {len(changed_files)} file(s).")
           if errors_found:
               print(f"FAILED: {errors_found} validation error(s) found.")
               sys.exit(1)
@@ -112,12 +268,29 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const outcome = '${{ steps.validate.outcome }}';
-            const status = outcome === 'success' ? 'passed' : 'FAILED';
-            const emoji = outcome === 'success' ? 'green_circle' : 'red_circle';
+            const pathOutcome  = '${{ steps.path_scope.outcome }}';
+            const dateOutcome  = '${{ steps.date_check.outcome }}';
+            const schemaOutcome = '${{ steps.validate.outcome }}';
+
+            const allPassed = [pathOutcome, dateOutcome, schemaOutcome].every(o => o === 'success');
+            const status = allPassed ? 'passed' : 'FAILED';
+            const emoji  = allPassed ? 'green_circle' : 'red_circle';
+
+            const lines = [
+              `:${emoji}: Telemetry validation **${status}**`,
+              '',
+              `| Check | Result |`,
+              `|---|---|`,
+              `| Path scope | ${pathOutcome === 'success' ? 'PASS' : 'FAIL'} |`,
+              `| Date range (max 7 days backdating) | ${dateOutcome === 'success' ? 'PASS' : 'FAIL'} |`,
+              `| Schema v1.1 | ${schemaOutcome === 'success' ? 'PASS' : 'FAIL'} |`,
+              '',
+              `See the [validate job](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.`
+            ];
+
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `:${emoji}: Telemetry schema validation **${status}**. See the [validate job](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.`
+              body: lines.join('\n')
             });

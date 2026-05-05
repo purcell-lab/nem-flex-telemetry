@@ -2,21 +2,52 @@
   "config": {
     "step": {
       "user": {
-        "title": "NEM Flex Telemetry: GitHub credentials and household identity",
-        "description": "Enter your GitHub fine-grained PAT (scoped to this repo with contents:write) and your household details.\n\nSee the [install guide]({pat_docs}) for how to create a PAT.\n\nAvailable NEM regions: {regions}",
+        "title": "NEM Flex Telemetry",
+        "description": "Connect your GitHub account so this household can publish flex telemetry to the cohort dataset. We use GitHub's Device Flow, no passwords or tokens to copy."
+      },
+      "show_code": {
+        "title": "Authorise on GitHub",
+        "description": "1. Open https://github.com/login/device in any browser\n2. Enter the code: {user_code}\n3. Approve access for NEM Flex Telemetry\n\nThis window will continue automatically once you approve."
+      },
+      "identity": {
+        "title": "Household identity",
+        "description": "Signed in as {github_login}. Choose a household identifier and confirm your location. The full NMI is never published, only the postcode prefix.",
         "data": {
-          "github_pat": "GitHub Fine-Grained PAT",
-          "household_id": "Household ID slug (e.g. sunshine-coast-01)",
-          "postcode_prefix": "Postcode prefix (first 3 digits only, e.g. 456)",
+          "household_id": "Household ID",
+          "postcode_prefix": "Postcode prefix (first 3 digits)",
           "region": "NEM region"
         }
       },
-      "entities": {
-        "title": "NEM Flex Telemetry: HAEO entity mappings",
-        "description": "Map each telemetry field to a Home Assistant entity from your [HAEO]({haeo_docs}) installation. All entities must be sensor.* entities.",
+      "entities_confirm": {
+        "title": "HAEO entities detected",
+        "description": "Found all required HAEO entities on this instance. Review and confirm, or tick 'Customise mapping' to override.\n\n{detected_entities}",
+        "data": {
+          "customise": "Customise mapping"
+        }
+      },
+      "entities_partial": {
+        "title": "Some HAEO entities missing",
+        "description": "Detected most entities automatically. Please pick the remaining {missing_count} from your sensors below.",
         "data": {
           "entity_net_import_kw": "Net import power (kW, signed)",
-          "entity_price_signal_seen": "Price signal seen ($/MWh)",
+          "entity_price_signal_seen": "Buy price signal ($/kWh)",
+          "entity_price_export_seen": "Export/sell price signal ($/kWh)",
+          "entity_optimiser_setpoint_kw": "Optimiser setpoint (kW, signed)",
+          "entity_flex_available_up_kw": "Flex available up (kW)",
+          "entity_flex_available_down_kw": "Flex available down (kW)",
+          "entity_storage_soc_pct": "Battery state of charge (%)",
+          "entity_envelope_import_limit_kw": "Envelope import limit (kW)",
+          "entity_envelope_export_limit_kw": "Envelope export limit (kW)",
+          "entity_naive_baseline_kw": "Naive baseline (kW)"
+        }
+      },
+      "entities_manual": {
+        "title": "Manual entity mapping",
+        "description": "HAEO was not detected on this Home Assistant instance, or its entities use non-default names. Please map each schema field to the appropriate sensor. See {haeo_repo} for the reference implementation.",
+        "data": {
+          "entity_net_import_kw": "Net import power (kW, signed)",
+          "entity_price_signal_seen": "Buy price signal ($/kWh)",
+          "entity_price_export_seen": "Export/sell price signal ($/kWh)",
           "entity_optimiser_setpoint_kw": "Optimiser setpoint (kW, signed)",
           "entity_flex_available_up_kw": "Flex available up (kW)",
           "entity_flex_available_down_kw": "Flex available down (kW)",
@@ -28,20 +59,42 @@
       },
       "consent": {
         "title": "NEM Flex Telemetry: Privacy and licence",
-        "description": "Your data will be published under the [CC-BY-4.0 licence]({licence_url}). Only your postcode prefix (3 digits), NEM region, and the 12 telemetry fields are published. No NMI, no exact location, no appliance data.\n\nSee the [privacy statement]({privacy_url}) for full details.",
+        "description": "Your data will be published under the [CC-BY-4.0 licence]({licence_url}). Only your postcode prefix (3 digits), NEM region, and the 13 telemetry fields are published. No NMI, no exact location, no appliance data.\n\nSee the [privacy statement]({privacy_url}) for full details.",
         "data": {
-          "opt_in_cohort": "Opt in to cohort aggregation (recommended)",
+          "opt_in_cohort": "Opt in to cohort aggregation (recommended: allows your flexibility to be counted in the community dataset)",
           "licence_agreed": "I agree to publish my telemetry data under CC-BY-4.0 (required)"
         }
+      },
+      "auth_error": {
+        "title": "GitHub authorisation failed",
+        "description": "{error_detail}",
+        "data": {
+          "retry": "Try again"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authorise NEM Flex Telemetry",
+        "description": "The GitHub token for {github_login} is no longer valid. Click Continue to re-authorise via Device Flow."
       }
     },
+    "progress": {
+      "waiting_for_user": "Waiting for GitHub authorisation..."
+    },
     "error": {
-      "github_auth_failed": "Could not authenticate with GitHub. Check that your PAT has contents:write access to this repository.",
+      "device_flow_expired": "The code expired before authorisation. Please try again.",
+      "device_flow_denied": "Authorisation was denied on GitHub.",
+      "device_flow_invalid": "The device code is invalid. Please try again.",
+      "network": "Could not reach GitHub. Check your connection and try again.",
+      "invalid_household_id": "Household ID must be a lowercase slug (letters, digits, hyphens), 3-64 characters, not starting with a hyphen.",
+      "invalid_postcode_prefix": "Postcode prefix must be exactly 3 digits.",
       "entity_must_be_sensor": "Entity ID must start with 'sensor.'",
+      "entity_required": "This field is required.",
       "licence_must_be_agreed": "You must agree to the CC-BY-4.0 data licence to participate."
     },
     "abort": {
-      "already_configured": "NEM Flex Telemetry is already configured for this household."
+      "already_configured": "NEM Flex Telemetry is already configured for this household.",
+      "reauth_successful": "GitHub re-authorisation completed successfully.",
+      "auth_error_aborted": "Authorisation cancelled."
     }
   },
   "options": {
@@ -50,7 +103,8 @@
         "title": "Update HAEO entity mappings",
         "data": {
           "entity_net_import_kw": "Net import power (kW, signed)",
-          "entity_price_signal_seen": "Price signal seen ($/MWh)",
+          "entity_price_signal_seen": "Buy price signal ($/kWh)",
+          "entity_price_export_seen": "Export/sell price signal ($/kWh)",
           "entity_optimiser_setpoint_kw": "Optimiser setpoint (kW, signed)",
           "entity_flex_available_up_kw": "Flex available up (kW)",
           "entity_flex_available_down_kw": "Flex available down (kW)",

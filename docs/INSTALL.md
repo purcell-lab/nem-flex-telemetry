@@ -10,23 +10,7 @@ This guide walks through adding your household to the NEM Flex Telemetry communi
 
 ---
 
-## Step 1: Create a fine-grained GitHub PAT
-
-The integration pushes data on your behalf using a personal access token (PAT) that you control. It is scoped to this single repo with the minimum permission required.
-
-1. Go to [github.com/settings/tokens](https://github.com/settings/tokens) and select **Fine-grained tokens**.
-2. Click **Generate new token**.
-3. Name it something like `nem-flex-telemetry-<your-ha-hostname>`.
-4. Set **Expiration** to at least 1 year (or no expiration).
-5. Under **Repository access**, select **Only select repositories**, then choose `purcell-lab/nem-flex-telemetry`.
-6. Under **Permissions > Repository permissions**, set **Contents** to **Read and write**. All other permissions should remain set to None.
-7. Click **Generate token** and copy it immediately. You will not see it again.
-
-Keep this token secure. If it is leaked, revoke it immediately and create a new one.
-
----
-
-## Step 2: Add the HACS custom repository
+## Step 1: Add the HACS custom repository
 
 1. In Home Assistant, go to **HACS** (in the sidebar).
 2. Click **Integrations**.
@@ -38,43 +22,60 @@ Keep this token secure. If it is leaked, revoke it immediately and create a new 
 
 ---
 
-## Step 3: Install the integration
+## Step 2: Install the integration
 
 1. In HACS Integrations, search for **NEM Flex Telemetry**.
 2. Click on it, then click **Download** (bottom right).
-3. Select version `0.1.0` (or the latest available).
+3. Select version `0.2.0` (or the latest available).
 4. Click **Download** to confirm.
 5. **Restart Home Assistant.** (Developer Tools > Restart, or Settings > System > Restart.)
 
 ---
 
-## Step 4: Config flow walkthrough
+## Step 3: Authorise via GitHub Device Flow
 
 After restarting, add the integration:
 
 1. Go to **Settings > Devices and Services > Add Integration**.
 2. Search for **NEM Flex Telemetry** and click it.
+3. The landing screen explains Device Flow. Click **Submit** to continue.
+4. A code appears on screen, for example: `ABCD-1234`.
+5. On any device (phone, laptop, tablet), open **https://github.com/login/device**.
+6. Enter the code shown in Home Assistant.
+7. GitHub will ask you to approve access for "NEM Flex Telemetry". Click **Authorise**.
+8. Return to Home Assistant. The config flow will continue automatically within a few seconds.
 
-### Step 4a: GitHub credentials and household identity
+No tokens to copy. No settings panels to navigate. The integration handles the rest.
 
-- **GitHub Fine-Grained PAT:** paste the token from Step 1.
-- **Household ID slug:** a unique lowercase identifier for your household, e.g. `sunshine-coast-01`. Use letters, digits, and hyphens. This becomes your directory name in the repo: `data/raw/<household-id>/`.
+---
+
+## Step 4: Household identity
+
+Once authorised, Home Assistant displays your GitHub login (read-only, filled automatically). Choose:
+
+- **Household ID:** a unique lowercase identifier for your household, e.g. `sunshine-coast-01`. Use letters, digits, and hyphens (3-64 characters). This becomes your directory name in the repo: `data/raw/<household-id>/`.
 - **Postcode prefix:** the first 3 digits of your postcode. For example, if your postcode is 4556, enter `455`. This is the maximum geographic resolution stored.
 - **NEM region:** select your NEM dispatch region. Most Queensland households are `QLD1`. If unsure, check [AEMO's map](https://www.aemo.com.au/energy-systems/electricity/national-electricity-market-nem/data-nem/network-data/network-outage-forecasting).
 
-Click **Submit**. The integration will verify your PAT against the GitHub repo. If it fails, check that your token has `Contents: Read and write` on the correct repo.
+Click **Submit**.
 
-### Step 4b: HAEO entity mappings
+---
 
-Map each telemetry field to a sensor entity from your HAEO installation. Default entity IDs are pre-filled based on standard HAEO naming conventions. If your HAEO entities have different IDs, update them here.
+## Step 5: HAEO entity mapping (auto-discovery)
 
-All entity IDs must start with `sensor.`.
+The integration scans your Home Assistant instance for known HAEO entity IDs.
 
-If you are unsure of your entity IDs, go to **Developer Tools > States** and search for `haeo` to find them.
+**If HAEO is installed with default entity names**, all required entities are detected automatically. You will see a confirmation screen listing the detected entities. Review them and click **Submit** to accept, or tick **Customise mapping** to override any.
 
-<!-- Screenshot placeholder: config_flow_entities.png -->
+**If some entities are missing**, the form pre-fills what was found and asks you to pick the remaining ones from a sensor dropdown. Only the missing fields are shown.
 
-### Step 4c: Privacy and licence agreement
+**If HAEO is not detected**, the full manual mapping form opens. Map each of the 13 schema fields to the appropriate sensor entity. All fields use a dropdown picker so you do not need to type entity IDs by hand. See [https://github.com/hass-energy/haeo](https://github.com/hass-energy/haeo) for the reference implementation.
+
+Note on flex headroom: if your HAEO instance does not expose `flex_available_up/down` entities directly, the integration derives them from your battery's maximum charge and discharge rate. A one-time INFO log message at startup explains this.
+
+---
+
+## Step 6: Privacy and licence agreement
 
 - **Opt in to cohort aggregation** (recommended): your data will be included in the cohort-level parquet files and dashboard views. Uncheck to push raw data to the repo but exclude from cohort aggregation.
 - **I agree to publish my telemetry data under CC-BY-4.0** (required): you must agree to this to proceed. Your data will be publicly readable under the Creative Commons Attribution 4.0 International licence.
@@ -83,7 +84,7 @@ Click **Submit** to complete setup.
 
 ---
 
-## Step 5: Verify data is flowing
+## Step 7: Verify data is flowing
 
 Wait up to 1 hour for the first automatic push, or use the manual push service immediately:
 
@@ -99,24 +100,40 @@ You can also check the status sensors created by the integration:
 
 ---
 
+## Revoking access
+
+To revoke the integration's access to your GitHub account at any time:
+
+1. Go to [https://github.com/settings/applications](https://github.com/settings/applications).
+2. Find "NEM Flex Telemetry" under **Authorised OAuth Apps**.
+3. Click **Revoke**.
+
+After revocation, the integration will detect the invalid token on the next push attempt and prompt you to re-authorise via Device Flow from the Home Assistant notifications panel.
+
+---
+
 ## Troubleshooting
 
-### "GitHub auth failed" in config flow
+### Config flow shows an authorisation error
 
-- Verify the PAT has `Contents: Read and write` permission.
-- Verify the PAT is scoped to `purcell-lab/nem-flex-telemetry` specifically.
-- Check the PAT has not expired.
+- Check that you entered the code on **https://github.com/login/device** (not github.com/login).
+- Codes expire after 15 minutes. If you see "code expired", click "Try again" in the config flow.
+- If GitHub shows "authorisation denied", you may have clicked the wrong button. Click "Try again" to restart.
 
 ### No data appearing in the repo after an hour
 
 - Check `sensor.<household_id>_push_errors`. If it is above 0, check the Home Assistant logs for `custom_components.nem_flex_telemetry` entries.
 - Ensure your HA instance has outbound internet access to `api.github.com`.
-- Try the manual push service (Step 5) and watch the logs.
+- Try the manual push service (Step 7) and watch the logs.
 
 ### Entity state is "unavailable" or "unknown"
 
 - Ensure HAEO is running and producing states for the entities you mapped.
-- Unavailable entities default to 0.0. This is intentional to ensure records are never dropped. If your battery is unavailable, `storage_soc_pct` will report 0.
+- Unavailable entities default to 0.0 to ensure records are never dropped. If your battery is unavailable, `storage_soc_pct` will report 0.
+
+### "Token invalid" notification appears
+
+Your OAuth token has been revoked or has expired. Click the notification or go to Settings > Devices and Services, find NEM Flex Telemetry, and click **Re-authenticate** to run Device Flow again. No data is lost; buffered records are re-pushed after re-authentication.
 
 ### Integration does not appear in HACS
 
@@ -133,5 +150,6 @@ Raise a [GitHub Issue](https://github.com/purcell-lab/nem-flex-telemetry/issues)
 ## Next steps
 
 - Watch the [dashboard](https://purcell-lab.github.io/nem-flex-telemetry/) for your household's data to appear in the cohort views.
-- Read [SCHEMA.md](../SCHEMA.md) for the full field specification.
+- Read [SCHEMA.md](../SCHEMA.md) for the full 13-field specification.
+- Read [docs/SECURITY.md](SECURITY.md) for the security and threat model.
 - Read [CONTRIBUTING.md](../CONTRIBUTING.md) to propose schema improvements or new dashboard views.

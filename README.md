@@ -8,6 +8,8 @@
 [![License: MIT](https://img.shields.io/badge/code-MIT-blue?style=flat-square)](LICENSE-CODE)
 [![License: CC BY 4.0](https://img.shields.io/badge/data-CC--BY--4.0-lightgreen?style=flat-square)](LICENSE-DATA)
 
+**Status: v0.2.0.** GitHub OAuth Device Flow, 13-field schema (v1.1 adds `price_export_seen`), HAEO entity auto-discovery.
+
 ---
 
 ## Why this exists
@@ -25,7 +27,7 @@ Frame: "IPRR Reporting Track, community data layer."
 
 ---
 
-## The 12-field schema
+## The 13-field schema (v1.1)
 
 Every 5-minute interval, each household pushes one record. Full specification: [SCHEMA.md](SCHEMA.md).
 
@@ -35,38 +37,27 @@ Every 5-minute interval, each household pushes one record. Full specification: [
 | `region` | string | NEM code | NSW1, QLD1, VIC1, SA1, TAS1 |
 | `postcode_prefix` | string | 3 digits | First 3 digits of postcode only |
 | `net_import_kw` | float | kW | Signed: positive = importing, negative = exporting |
-| `price_signal_seen` | float | $/MWh | RRP or tariff signal used by optimiser |
+| `price_signal_seen` | float | $/MWh | Buy price signal seen by the optimiser |
+| `price_export_seen` | float | $/MWh | Export/sell price seen by the optimiser. Positive = FiT earned, negative = negative FiT event |
 | `optimiser_setpoint_kw` | float | kW | Setpoint commanded by HAEO |
 | `flex_available_up_kw` | float | kW | Headroom available to increase load |
-| `flex_available_down_kw` | float | kW | Headroom available to decrease load / export |
+| `flex_available_down_kw` | float | kW | Headroom available to decrease load or export |
 | `storage_soc_pct` | float | % | Battery state of charge, 0-100 |
 | `envelope_import_limit_kw` | float | kW | DNSP-derived import limit |
 | `envelope_export_limit_kw` | float | kW | DNSP-derived export limit |
 | `naive_baseline_kw` | float | kW | What consumption would have been without optimisation |
 
-The `naive_baseline_kw` field is the receipts field: it lets auditors verify demand response ex-post without trusting any single party's measurement. The `price_signal_seen` field makes the demand-response curve estimable for the first time from open community data.
+The `price_export_seen` field (added in schema v1.1) captures the buy/sell price asymmetry seen by the optimiser. As middle-of-day feed-in tariffs collapse or go negative, publishing both prices makes this visible at cohort scale for the first time.
 
 ---
 
-## How to join (4 steps)
+## How to join
 
 **Prerequisites:** Home Assistant running with [HAEO](https://github.com/hass-energy/haeo) configured.
 
-### Step 1: Create a fine-grained GitHub PAT
+### Step 1: Install via HACS, then click through GitHub Device Flow when prompted. No tokens to copy.
 
-In your GitHub account, create a fine-grained PAT scoped to `purcell-lab/nem-flex-telemetry` with `Contents: Read and write` permission only. Copy the token.
-
-### Step 2: Add the HACS custom repository
-
-In HACS, go to Integrations, click the three-dot menu, select "Custom repositories", paste `https://github.com/purcell-lab/nem-flex-telemetry`, category Integration.
-
-### Step 3: Install the integration
-
-Search HACS for "NEM Flex Telemetry" and install. Restart Home Assistant.
-
-### Step 4: Run the config flow
-
-Settings > Devices and Services > Add Integration > NEM Flex Telemetry. Follow the prompts: enter your PAT, household ID slug, postcode prefix (3 digits), NEM region, map your HAEO entities, and opt in to cohort participation and the CC-BY-4.0 data licence.
+In HACS, add this repo as a custom Integration source: `https://github.com/purcell-lab/nem-flex-telemetry`. Install, restart HA, then go to Settings > Devices and Services > Add Integration > NEM Flex Telemetry. The integration will guide you through GitHub authorisation using Device Flow.
 
 Full guide: [docs/INSTALL.md](docs/INSTALL.md)
 
@@ -76,7 +67,8 @@ Full guide: [docs/INSTALL.md](docs/INSTALL.md)
 
 - Postcode prefix (first 3 digits) only. No exact location. No NMI. No appliance-level data.
 - Data is published under CC-BY-4.0. You retain no expectation of re-identification given the postcode prefix anonymisation.
-- You can withdraw at any time by deleting your branch and raising an issue to request data removal from historical cohort files.
+- You can withdraw at any time by raising an issue to request data removal from historical cohort files.
+- Security model: [docs/SECURITY.md](docs/SECURITY.md)
 
 ---
 
@@ -85,7 +77,7 @@ Full guide: [docs/INSTALL.md](docs/INSTALL.md)
 ```mermaid
 graph LR
     HA[Home Assistant\n+ HAEO] -->|5-min state reads| INT[nem_flex_telemetry\nintegration]
-    INT -->|hourly JSONL commit\nPyGithub + fine-grained PAT| RAW[data/raw/household_id/\nYYYY/MM/DD.jsonl]
+    INT -->|hourly JSONL commit\naiohttp + OAuth token| RAW[data/raw/household_id/\nYYYY/MM/DD.jsonl]
     RAW -->|push trigger\n+ hourly cron| AGG[aggregate.yml\nGitHub Action]
     AGG -->|pandas + pyarrow| PAR[data/cohort/\ndaily hourly 5min\n.parquet]
     AGG -->|derived JSON views| SITEDATA[site/data/*.json]
@@ -99,7 +91,7 @@ graph LR
 | Version | Milestone |
 |---|---|
 | v0.1 | Single-household MVP: integration installs, pushes JSONL, dashboard renders |
-| v0.2 | Cohort of 10 households across at least 2 NEM regions |
+| v0.2 | OAuth Device Flow, schema v1.1 (price_export_seen), HAEO entity auto-discovery |
 | v0.3 | ARENA-grant-ready cohort of 100, automated IPRR-format reporting exports |
 | v1.0 | IPRR-submission-ready cohort of 1000, full price-response curve with statistical confidence |
 

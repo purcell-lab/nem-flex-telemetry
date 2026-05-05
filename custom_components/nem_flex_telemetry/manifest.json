@@ -1,12 +1,11 @@
 {
   "domain": "nem_flex_telemetry",
   "name": "NEM Flex Telemetry",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "documentation": "https://github.com/purcell-lab/nem-flex-telemetry/blob/main/docs/INSTALL.md",
   "issue_tracker": "https://github.com/purcell-lab/nem-flex-telemetry/issues",
   "codeowners": ["@purcell-lab"],
   "requirements": [
-    "PyGithub>=2.1.0",
     "voluptuous>=0.14.1",
     "aiohttp>=3.9.0"
   ],

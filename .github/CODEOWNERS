@@ -1,0 +1,30 @@
+# Path-scoped governance for NEM Flex Telemetry.
+#
+# Households writing to data/raw/<their-login>/** are NOT blocked by
+# CODEOWNERS, but are protected by the validate.yml CI check which ensures:
+#   - Every commit to data/raw/** comes from a verified GitHub user
+#   - Committed paths match data/raw/<commit-author-login>/** only
+#   - Records pass schema v1.1 validation
+#   - Records are not backdated more than 7 days
+#   - No more than 12 records per 5-min interval per household (rate limit)
+#   - Failures result in the commit being reverted by a follow-up bot commit
+#
+# See docs/SECURITY.md for the full security and threat model.
+
+# Default owner for all paths not matched below
+*                          @purcell-lab
+
+# Schema is governed: all schema changes require maintainer review
+/schema/                   @purcell-lab
+
+# Aggregation logic is governed: output correctness is critical
+/scripts/                  @purcell-lab
+
+# Dashboard is governed: visualisation accuracy matters
+/site/                     @purcell-lab
+
+# CI workflows are governed: security-critical
+/.github/                  @purcell-lab
+
+# Integration code is governed
+/custom_components/        @purcell-lab
