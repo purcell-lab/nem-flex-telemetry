@@ -1,19 +1,46 @@
 {
   "asset_mix": {
-    "stationary_battery_kwh": 0.0,
-    "ev_kwh": 0.0
+    "stationary_battery_kwh": 5.04,
+    "ev_kwh": 92.98
   },
   "v2g_duty_cycle": {
-    "intervals": [],
-    "unplugged_pct": [],
-    "plugged_idle_pct": [],
-    "charging_pct": [],
-    "discharging_pct": [],
-    "driving_pct": []
+    "intervals": [
+      "2026-05-05T10:00:00Z",
+      "2026-05-05T11:00:00Z"
+    ],
+    "unplugged_pct": [
+      0.0,
+      0.0
+    ],
+    "plugged_idle_pct": [
+      100.0,
+      93.8
+    ],
+    "charging_pct": [
+      0.0,
+      6.2
+    ],
+    "discharging_pct": [
+      0.0,
+      0.0
+    ],
+    "driving_pct": [
+      0.0,
+      0.0
+    ]
   },
   "v2g_dispatch_share": {
-    "intervals": [],
-    "battery_kw": [],
-    "ev_kw": []
+    "intervals": [
+      "2026-05-05T10:00:00Z",
+      "2026-05-05T11:00:00Z"
+    ],
+    "battery_kw": [
+      4.68,
+      5.74
+    ],
+    "ev_kw": [
+      0.0,
+      0.0
+    ]
   }
 }

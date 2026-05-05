@@ -1,6 +1,19 @@
 {
-  "intervals": [],
-  "flex_up_kw": [],
-  "flex_down_kw": [],
-  "price_signal": []
+  "intervals": [
+    "2026-05-05T10:00:00Z",
+    "2026-05-05T11:00:00Z"
+  ],
+  "flex_up_kw": [
+    15.32,
+    34.26
+  ],
+  "flex_down_kw": [
+    20.0,
+    40.0
+  ],
+  "price_signal": [
+    0.3809,
+    0.222775
+  ],
+  "price_unit": "$/kWh"
 }

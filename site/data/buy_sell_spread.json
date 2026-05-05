@@ -7,9 +7,18 @@
       "negative_fit_intervals": []
     },
     "QLD1": {
-      "intervals": [],
-      "buy_price": [],
-      "sell_price": [],
+      "intervals": [
+        "2026-05-05T10:00:00Z",
+        "2026-05-05T11:00:00Z"
+      ],
+      "buy_price": [
+        0.3809,
+        0.222775
+      ],
+      "sell_price": [
+        0.1233,
+        0.124538
+      ],
       "negative_fit_intervals": []
     },
     "VIC1": {

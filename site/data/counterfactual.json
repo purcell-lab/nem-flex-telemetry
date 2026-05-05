@@ -1,7 +1,16 @@
 {
-  "intervals": [],
-  "interval_savings": [],
-  "cumulative_savings": [],
-  "total_savings": 0.0,
+  "intervals": [
+    "2026-05-05T10:00:00Z",
+    "2026-05-05T11:00:00Z"
+  ],
+  "interval_savings": [
+    0.048,
+    0.0595
+  ],
+  "cumulative_savings": [
+    0.048,
+    0.1075
+  ],
+  "total_savings": 0.11,
   "price_unit": "$/kWh"
 }

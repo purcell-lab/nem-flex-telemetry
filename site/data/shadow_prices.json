@@ -38,7 +38,7 @@
       0.0,
       0.0,
       0.0,
-      0.0,
+      -0.000101,
       0.0,
       0.0,
       0.0,
@@ -64,7 +64,7 @@
       0.0,
       0.0,
       0.0,
-      0.0,
+      -0.00026,
       0.0,
       0.0,
       0.0,
@@ -106,7 +106,9 @@
     ]
   },
   "envelope_shadow_heatmap": {
-    "postcode_prefixes": [],
+    "postcode_prefixes": [
+      "456"
+    ],
     "hours": [
       0,
       1,
@@ -133,8 +135,62 @@
       22,
       23
     ],
-    "import_shadow": [],
-    "export_shadow": []
+    "import_shadow": [
+      [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    ],
+    "export_shadow": [
+      [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    ]
   },
   "price_unit": "$/kWh",
   "explainer": "Shadow prices reveal the marginal value the optimiser placed on energy and binding constraints. Non-zero envelope shadow prices show where the network is actually constraining flex, in dollar terms."
