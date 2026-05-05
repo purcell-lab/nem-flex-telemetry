@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>About — NEM Flex Telemetry</title>
+  <meta name="description" content="About the NEM Flex Telemetry project: open-data household demand flexibility for the National Electricity Market." />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink:   '#0E1416',
+            teal:  '#4FB3BF',
+            rust:  '#D78562',
+            gold:  '#E8B254',
+            paper: '#F2EFE7',
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            display: ['Fraunces', 'Georgia', 'serif'],
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background-color: #F2EFE7; color: #0E1416; }
+    table { border-collapse: collapse; width: 100%; }
+    th { background-color: #0E1416; color: #F2EFE7; padding: 8px 12px; text-align: left; font-size: 13px; }
+    td { padding: 8px 12px; font-size: 13px; border-bottom: 1px solid #0E1416/10; }
+    tr:nth-child(even) td { background-color: rgba(14,20,22,0.04); }
+    code { background: rgba(14,20,22,0.08); padding: 1px 5px; border-radius: 3px; font-size: 0.9em; }
+  </style>
+</head>
+
+<body class="min-h-screen font-sans">
+
+  <!-- Header -->
+  <header class="bg-ink text-paper px-6 py-8">
+    <div class="max-w-4xl mx-auto">
+      <a href="index.html" class="text-teal text-sm hover:underline mb-4 block">&larr; Dashboard</a>
+      <h1 class="font-display text-3xl font-bold text-teal mb-2">About NEM Flex Telemetry</h1>
+      <p class="text-paper/70 text-lg">OpenNEM for the demand side</p>
+    </div>
+  </header>
+
+  <main class="max-w-4xl mx-auto px-6 py-10 space-y-12">
+
+    <!-- What is this -->
+    <section>
+      <h2 class="font-display text-2xl font-bold text-ink mb-4">What is this?</h2>
+      <p class="text-ink/80 leading-relaxed mb-4">
+        NEM Flex Telemetry is an open-data community project that collects 5-minute interval
+        telemetry from household energy optimisers (specifically
+        <a href="https://github.com/hass-energy/haeo" class="text-teal hover:underline">HAEO</a>
+        running inside Home Assistant) and publishes it as an open dataset under CC-BY-4.0.
+      </p>
+      <p class="text-ink/80 leading-relaxed mb-4">
+        The goal is to build the demand-side equivalent of
+        <a href="https://openelectricity.org.au/" class="text-teal hover:underline">OpenElectricity</a>:
+        a community-maintained, publicly accessible picture of how much flexible load exists in the
+        National Electricity Market, where it is, and how it responds to price signals.
+      </p>
+      <p class="text-ink/80 leading-relaxed">
+        This data is framed as a community-data complement to AEMO's
+        <a href="https://www.aemo.com.au/-/media/files/initiatives/integrating-price-responsive-resources-into-the-nem/iprr---hlia---v11-for-publication.pdf"
+           class="text-teal hover:underline" target="_blank" rel="noopener">IPRR Reporting Track</a>.
+        See <a href="https://github.com/purcell-lab/nem-flex-telemetry/blob/main/docs/IPRR-SUBMISSION.md"
+               class="text-teal hover:underline">docs/IPRR-SUBMISSION.md</a> for the full framing.
+      </p>
+    </section>
+
+    <!-- The 12-field schema -->
+    <section>
+      <h2 class="font-display text-2xl font-bold text-ink mb-4">The 12-field schema</h2>
+      <p class="text-ink/80 leading-relaxed mb-6">
+        Every 5 minutes, each participating household pushes one record. Full specification:
+        <a href="https://github.com/purcell-lab/nem-flex-telemetry/blob/main/SCHEMA.md" class="text-teal hover:underline">SCHEMA.md</a>.
+        Machine-readable: <a href="https://github.com/purcell-lab/nem-flex-telemetry/blob/main/schema/telemetry.schema.json" class="text-teal hover:underline">schema/telemetry.schema.json</a>.
+      </p>
+
+      <div class="overflow-x-auto rounded-lg shadow-sm border border-ink/10">
+        <table>
+          <thead>
+            <tr>
+              <th>Field</th>
+              <th>Type</th>
+              <th>Units</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><code>interval_start_utc</code></td><td>string</td><td>ISO8601 UTC</td><td>Interval start timestamp</td></tr>
+            <tr><td><code>region</code></td><td>string</td><td>NEM code</td><td>NSW1, QLD1, VIC1, SA1, TAS1</td></tr>
+            <tr><td><code>postcode_prefix</code></td><td>string</td><td>3 digits</td><td>First 3 digits of postcode only (privacy boundary)</td></tr>
+            <tr><td><code>net_import_kw</code></td><td>number</td><td>kW, signed</td><td>Net grid import (+) or export (-)</td></tr>
+            <tr><td><code>price_signal_seen</code></td><td>number</td><td>$/MWh</td><td>Price or tariff signal used by HAEO optimiser</td></tr>
+            <tr><td><code>optimiser_setpoint_kw</code></td><td>number</td><td>kW, signed</td><td>Setpoint commanded by HAEO</td></tr>
+            <tr><td><code>flex_available_up_kw</code></td><td>number</td><td>kW, &ge;0</td><td>Additional load the household could absorb now</td></tr>
+            <tr><td><code>flex_available_down_kw</code></td><td>number</td><td>kW, &ge;0</td><td>Load reduction or export increase available now</td></tr>
+            <tr><td><code>storage_soc_pct</code></td><td>number</td><td>%, 0-100</td><td>Battery state of charge</td></tr>
+            <tr><td><code>envelope_import_limit_kw</code></td><td>number</td><td>kW, &ge;0</td><td>Max allowed import (DNSP or firmware constraint)</td></tr>
+            <tr><td><code>envelope_export_limit_kw</code></td><td>number</td><td>kW, &ge;0</td><td>Max allowed export</td></tr>
+            <tr><td><code>naive_baseline_kw</code></td><td>number</td><td>kW, signed</td><td>Estimated consumption without optimisation (the receipts field)</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- IPRR framing -->
+    <section>
+      <h2 class="font-display text-2xl font-bold text-ink mb-4">IPRR framing</h2>
+      <p class="text-ink/80 leading-relaxed mb-4">
+        AEMO's Integrating Price-Responsive Resources (IPRR) program, and its associated
+        <a href="https://www.aemo.com.au/-/media/files/electricity/nem/planning_and_forecasting/unscheduled-price-responsive-resources/final-determination-price-responsive-reporting-guidelines.pdf"
+           class="text-teal hover:underline" target="_blank" rel="noopener">Price Responsive Reporting Guidelines</a>,
+        require aggregators to report available capacity, price responsiveness, and envelope constraints.
+      </p>
+      <p class="text-ink/80 leading-relaxed mb-4">
+        This project is not a registered aggregator. It is the open-data complement: a community
+        dataset that demonstrates what distributed household optimisers can measure and report, using
+        only open tools and a standard schema, with no central intermediary.
+      </p>
+      <p class="text-ink/80 leading-relaxed">
+        <a href="https://www.ausgrid.com.au/-/media/Documents/1-PDF/Project-Edith-Insights-Report-Dec-2025.pdf"
+           class="text-teal hover:underline" target="_blank" rel="noopener">Project Edith (Ausgrid, Dec 2025)</a>
+        identified envelope constraints as a critical missing data layer for locational DER planning.
+        The <code>envelope_import_limit_kw</code> and <code>envelope_export_limit_kw</code> fields
+        in this schema are a direct response to that finding.
+      </p>
+    </section>
+
+    <!-- How to join -->
+    <section>
+      <h2 class="font-display text-2xl font-bold text-ink mb-4">How to join</h2>
+      <p class="text-ink/80 leading-relaxed mb-4">
+        Requirements: Home Assistant with
+        <a href="https://github.com/hass-energy/haeo" class="text-teal hover:underline">HAEO</a>
+        installed and configured for your household.
+      </p>
+
+      <ol class="space-y-4">
+        <li class="flex gap-4">
+          <span class="flex-shrink-0 w-8 h-8 bg-teal text-white rounded-full flex items-center justify-center font-bold text-sm">1</span>
+          <div>
+            <p class="font-medium text-ink">Create a fine-grained GitHub PAT</p>
+            <p class="text-sm text-ink/60 mt-1">
+              In your GitHub account, create a fine-grained PAT scoped to
+              <code>purcell-lab/nem-flex-telemetry</code> with <code>Contents: Read and write</code>.
+            </p>
+          </div>
+        </li>
+        <li class="flex gap-4">
+          <span class="flex-shrink-0 w-8 h-8 bg-teal text-white rounded-full flex items-center justify-center font-bold text-sm">2</span>
+          <div>
+            <p class="font-medium text-ink">Add HACS custom repository</p>
+            <p class="text-sm text-ink/60 mt-1">
+              In HACS, add <code>https://github.com/purcell-lab/nem-flex-telemetry</code>
+              as a custom Integration repository.
+            </p>
+          </div>
+        </li>
+        <li class="flex gap-4">
+          <span class="flex-shrink-0 w-8 h-8 bg-teal text-white rounded-full flex items-center justify-center font-bold text-sm">3</span>
+          <div>
+            <p class="font-medium text-ink">Install and configure</p>
+            <p class="text-sm text-ink/60 mt-1">
+              Install "NEM Flex Telemetry" from HACS, restart HA, then go to
+              Settings &rarr; Devices &amp; Services &rarr; Add Integration.
+              Enter your PAT, household ID, postcode prefix, region, and HAEO entity mappings.
+            </p>
+          </div>
+        </li>
+        <li class="flex gap-4">
+          <span class="flex-shrink-0 w-8 h-8 bg-teal text-white rounded-full flex items-center justify-center font-bold text-sm">4</span>
+          <div>
+            <p class="font-medium text-ink">Opt in and verify</p>
+            <p class="text-sm text-ink/60 mt-1">
+              Agree to the CC-BY-4.0 data licence, opt in to cohort participation,
+              and verify data is flowing at
+              <code>github.com/purcell-lab/nem-flex-telemetry/tree/main/data/raw/&lt;your-id&gt;</code>.
+            </p>
+          </div>
+        </li>
+      </ol>
+
+      <div class="mt-6">
+        <a href="https://github.com/purcell-lab/nem-flex-telemetry/blob/main/docs/INSTALL.md"
+           class="inline-flex items-center gap-2 bg-teal text-white px-5 py-3 rounded-lg font-medium hover:bg-teal/90 transition-colors">
+          Full installation guide &rarr;
+        </a>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Footer -->
+  <footer class="bg-ink text-paper/60 px-6 py-8 mt-12">
+    <div class="max-w-4xl mx-auto flex flex-col sm:flex-row justify-between gap-4 text-sm">
+      <div>
+        <span class="text-paper font-semibold">NEM Flex Telemetry</span> — OpenNEM for the demand side.
+        <br />Code: <a href="https://github.com/purcell-lab/nem-flex-telemetry/blob/main/LICENSE-CODE" class="text-teal hover:underline">MIT</a>.
+        Data: <a href="https://creativecommons.org/licenses/by/4.0/" class="text-teal hover:underline">CC-BY-4.0</a>.
+      </div>
+      <div class="flex flex-col sm:items-end gap-1">
+        <a href="https://github.com/purcell-lab/nem-flex-telemetry" class="text-teal hover:underline">GitHub repo</a>
+        <a href="index.html" class="text-teal hover:underline">Dashboard</a>
+        <a href="https://www.aemo.com.au/-/media/files/initiatives/integrating-price-responsive-resources-into-the-nem/iprr---hlia---v11-for-publication.pdf"
+           class="text-teal hover:underline" target="_blank" rel="noopener">AEMO IPRR HLIA</a>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>

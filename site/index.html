@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NEM Flex Telemetry — OpenNEM for the demand side</title>
+  <meta name="description" content="Community-built open-data dashboard of household demand flexibility in the National Electricity Market." />
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,700;1,9..144,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+  <!-- Tailwind CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink:   '#0E1416',
+            teal:  '#4FB3BF',
+            rust:  '#D78562',
+            gold:  '#E8B254',
+            paper: '#F2EFE7',
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            display: ['Fraunces', 'Georgia', 'serif'],
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Observable Plot CDN -->
+  <script type="module">
+    import * as Plot from "https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6/+esm";
+    window.Plot = Plot;
+  </script>
+
+  <style>
+    body { background-color: #F2EFE7; color: #0E1416; }
+    .tab-btn { transition: all 0.15s ease; }
+    .tab-btn.active {
+      border-bottom: 3px solid #4FB3BF;
+      color: #0E1416;
+      font-weight: 600;
+    }
+    .tab-btn:not(.active) { color: #6b7280; border-bottom: 3px solid transparent; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    #chart-flex, #chart-price, #chart-envelope, #chart-counterfactual {
+      min-height: 340px;
+    }
+    /* Plot override: match palette */
+    svg text { font-family: 'Inter', sans-serif; font-size: 12px; }
+  </style>
+</head>
+
+<body class="min-h-screen font-sans">
+
+  <!-- Header -->
+  <header class="bg-ink text-paper px-6 py-8">
+    <div class="max-w-6xl mx-auto">
+      <h1 class="font-display text-3xl font-bold text-teal mb-1">
+        NEM Flex Telemetry
+      </h1>
+      <p class="text-paper/80 text-lg mb-6">
+        OpenNEM for the demand side. Community-built open data on household demand flexibility in the National Electricity Market.
+      </p>
+
+      <!-- Stats bar -->
+      <div id="stats-bar" class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div class="bg-ink/50 rounded-lg p-4">
+          <div class="text-xs text-paper/60 uppercase tracking-wide mb-1">Households</div>
+          <div id="stat-cohort" class="text-2xl font-bold text-teal">--</div>
+        </div>
+        <div class="bg-ink/50 rounded-lg p-4">
+          <div class="text-xs text-paper/60 uppercase tracking-wide mb-1">Intervals reported</div>
+          <div id="stat-intervals" class="text-2xl font-bold text-gold">--</div>
+        </div>
+        <div class="bg-ink/50 rounded-lg p-4">
+          <div class="text-xs text-paper/60 uppercase tracking-wide mb-1">Counterfactual savings</div>
+          <div id="stat-savings" class="text-2xl font-bold text-rust">$--</div>
+        </div>
+        <div class="bg-ink/50 rounded-lg p-4">
+          <div class="text-xs text-paper/60 uppercase tracking-wide mb-1">Last updated</div>
+          <div id="stat-updated" class="text-sm font-medium text-paper/80">--</div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main content -->
+  <main class="max-w-6xl mx-auto px-6 py-8">
+
+    <!-- Tab navigation -->
+    <nav class="flex gap-0 border-b border-ink/20 mb-8" role="tablist">
+      <button class="tab-btn active px-4 py-3 text-sm" data-tab="flex" role="tab" aria-selected="true">
+        Cohort flex stack
+      </button>
+      <button class="tab-btn px-4 py-3 text-sm" data-tab="price" role="tab" aria-selected="false">
+        Price-response curve
+      </button>
+      <button class="tab-btn px-4 py-3 text-sm" data-tab="envelope" role="tab" aria-selected="false">
+        Envelope compliance
+      </button>
+      <button class="tab-btn px-4 py-3 text-sm" data-tab="counterfactual" role="tab" aria-selected="false">
+        Counterfactual ledger
+      </button>
+    </nav>
+
+    <!-- Tab a: Cohort flex stack -->
+    <section class="tab-panel active" id="tab-flex" role="tabpanel">
+      <div class="mb-4">
+        <h2 class="text-xl font-semibold text-ink mb-1">Cohort flex stack</h2>
+        <p class="text-sm text-ink/60">
+          Total upward and downward flexibility available across the cohort, with the price signal overlay.
+          The gap between flex_up (teal) and flex_down (rust) shows the aggregate demand-shift envelope.
+        </p>
+      </div>
+      <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
+        <div id="chart-flex"></div>
+      </div>
+    </section>
+
+    <!-- Tab b: Price-response curve -->
+    <section class="tab-panel" id="tab-price" role="tabpanel">
+      <div class="mb-4">
+        <h2 class="text-xl font-semibold text-ink mb-1">Price-response curve</h2>
+        <p class="text-sm text-ink/60">
+          Net import (kW) versus price signal seen ($/MWh), faceted by NEM region.
+          The negative slope makes the demand-response curve estimable from open data for the first time.
+        </p>
+      </div>
+      <div id="region-selector" class="flex gap-2 mb-4 flex-wrap">
+        <!-- Region buttons injected by JS -->
+      </div>
+      <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
+        <div id="chart-price"></div>
+      </div>
+    </section>
+
+    <!-- Tab c: Envelope compliance heatmap -->
+    <section class="tab-panel" id="tab-envelope" role="tabpanel">
+      <div class="mb-4">
+        <h2 class="text-xl font-semibold text-ink mb-1">Envelope compliance heatmap</h2>
+        <p class="text-sm text-ink/60">
+          Proportion of 5-minute intervals where the optimiser setpoint was within the DNSP envelope,
+          by postcode prefix and hour of day. Green = fully compliant. Red = frequent violations.
+        </p>
+      </div>
+      <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
+        <div id="chart-envelope"></div>
+      </div>
+    </section>
+
+    <!-- Tab d: Counterfactual ledger -->
+    <section class="tab-panel" id="tab-counterfactual" role="tabpanel">
+      <div class="mb-4">
+        <h2 class="text-xl font-semibold text-ink mb-1">Counterfactual ledger</h2>
+        <p class="text-sm text-ink/60">
+          Cumulative demand-response savings in AUD, estimated as
+          <code class="bg-ink/5 px-1 rounded">(naive_baseline - net_import) x price_signal / 1000 / 12</code>
+          per 5-minute interval. This is the receipts field: auditable, open, no single party to trust.
+        </p>
+      </div>
+
+      <!-- Prominent total -->
+      <div class="bg-ink rounded-xl p-6 mb-6 text-center">
+        <div class="text-xs text-paper/60 uppercase tracking-widest mb-2">Total counterfactual savings</div>
+        <div id="total-savings-display" class="font-display text-5xl font-bold text-gold mb-1">$--</div>
+        <div class="text-sm text-paper/50">Across cohort, since data collection began</div>
+      </div>
+
+      <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
+        <div id="chart-counterfactual"></div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Footer -->
+  <footer class="bg-ink text-paper/60 px-6 py-8 mt-12">
+    <div class="max-w-6xl mx-auto flex flex-col sm:flex-row justify-between gap-4 text-sm">
+      <div>
+        <span class="text-paper font-semibold">NEM Flex Telemetry</span> — OpenNEM for the demand side.
+        <br />Code: <a href="https://github.com/purcell-lab/nem-flex-telemetry/blob/main/LICENSE-CODE" class="text-teal hover:underline">MIT</a>.
+        Data: <a href="https://creativecommons.org/licenses/by/4.0/" class="text-teal hover:underline">CC-BY-4.0</a>.
+      </div>
+      <div class="flex flex-col sm:items-end gap-1">
+        <a href="https://github.com/purcell-lab/nem-flex-telemetry" class="text-teal hover:underline">GitHub repo</a>
+        <a href="about.html" class="text-teal hover:underline">About this project</a>
+        <a href="https://www.aemo.com.au/-/media/files/initiatives/integrating-price-responsive-resources-into-the-nem/iprr---hlia---v11-for-publication.pdf"
+           class="text-teal hover:underline" target="_blank" rel="noopener">AEMO IPRR HLIA</a>
+      </div>
+    </div>
+  </footer>
+
+<script type="module">
+// ---------------------------------------------------------------------------
+// Dashboard JS: load data, render charts with Observable Plot
+// ---------------------------------------------------------------------------
+
+// Colour palette
+const TEAL  = '#4FB3BF';
+const RUST  = '#D78562';
+const GOLD  = '#E8B254';
+const INK   = '#0E1416';
+const PAPER = '#F2EFE7';
+
+// ---------------------------------------------------------------------------
+// Tab switching
+// ---------------------------------------------------------------------------
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const tab = btn.dataset.tab;
+    document.querySelectorAll('.tab-btn').forEach(b => {
+      b.classList.toggle('active', b === btn);
+      b.setAttribute('aria-selected', b === btn ? 'true' : 'false');
+    });
+    document.querySelectorAll('.tab-panel').forEach(p => {
+      p.classList.toggle('active', p.id === `tab-${tab}`);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Data loading
+// ---------------------------------------------------------------------------
+async function loadData() {
+  // Try to load real aggregated data, fall back to sample
+  const urls = [
+    'data/status.json',
+    'data/cohort_flex_stack.json',
+    'data/price_response.json',
+    'data/envelope_heatmap.json',
+    'data/counterfactual.json',
+  ];
+
+  async function tryLoad(url, fallbackKey) {
+    try {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return await r.json();
+    } catch {
+      // Fall back to sample.json
+      const s = await fetch('data/sample.json');
+      const sample = await s.json();
+      return sample[fallbackKey] || sample;
+    }
+  }
+
+  // Load sample first as the base fallback
+  let sample = {};
+  try {
+    const sr = await fetch('data/sample.json');
+    sample = await sr.json();
+  } catch { /* no sample */ }
+
+  const [status, flexStack, priceResp, envelope, counterfactual] = await Promise.all([
+    tryLoad('data/status.json', 'status'),
+    tryLoad('data/cohort_flex_stack.json', 'cohort_flex_stack'),
+    tryLoad('data/price_response.json', 'price_response'),
+    tryLoad('data/envelope_heatmap.json', 'envelope_heatmap'),
+    tryLoad('data/counterfactual.json', 'counterfactual'),
+  ]);
+
+  return { status, flexStack, priceResp, envelope, counterfactual };
+}
+
+// ---------------------------------------------------------------------------
+// Stats bar
+// ---------------------------------------------------------------------------
+function renderStats(status) {
+  document.getElementById('stat-cohort').textContent = status.cohort_size ?? '--';
+  document.getElementById('stat-intervals').textContent =
+    status.total_intervals ? status.total_intervals.toLocaleString() : '--';
+  document.getElementById('stat-savings').textContent =
+    status.total_savings_aud != null
+      ? `$${status.total_savings_aud.toLocaleString('en-AU', { minimumFractionDigits: 2 })}`
+      : '$--';
+  document.getElementById('stat-updated').textContent =
+    status.last_updated
+      ? new Date(status.last_updated).toLocaleString('en-AU', { timeZone: 'Australia/Brisbane', dateStyle: 'short', timeStyle: 'short' })
+      : '--';
+}
+
+// ---------------------------------------------------------------------------
+// Chart a: Cohort flex stack
+// ---------------------------------------------------------------------------
+function renderFlexStack(d) {
+  const el = document.getElementById('chart-flex');
+  if (!d.intervals || d.intervals.length === 0) {
+    el.innerHTML = '<p class="text-ink/40 text-center py-12">No data yet. Be the first household to join!</p>';
+    return;
+  }
+
+  const times = d.intervals.map(s => new Date(s));
+
+  const upData    = times.map((t, i) => ({ t, v: d.flex_up_kw[i],  label: 'Flex up' }));
+  const downData  = times.map((t, i) => ({ t, v: d.flex_down_kw[i], label: 'Flex down' }));
+  const priceData = times.map((t, i) => ({ t, v: d.price_signal[i] }));
+
+  const plot = window.Plot.plot({
+    width: el.parentElement.clientWidth - 32,
+    height: 340,
+    marginRight: 60,
+    x: { type: 'utc', label: 'Time (UTC)' },
+    y: { label: 'kW (cohort total)', grid: true },
+    color: { domain: ['Flex up', 'Flex down'], range: [TEAL, RUST] },
+    marks: [
+      window.Plot.areaY(upData,   { x: 't', y: 'v', fill: TEAL,  fillOpacity: 0.35, tip: true }),
+      window.Plot.lineY(upData,   { x: 't', y: 'v', stroke: TEAL,  strokeWidth: 2 }),
+      window.Plot.areaY(downData, { x: 't', y: 'v', fill: RUST,  fillOpacity: 0.25, tip: true }),
+      window.Plot.lineY(downData, { x: 't', y: 'v', stroke: RUST,  strokeWidth: 2 }),
+      window.Plot.lineY(priceData, {
+        x: 't', y: 'v',
+        stroke: GOLD, strokeWidth: 1.5, strokeDasharray: '4 2',
+        title: d => `Price: $${d.v}/MWh`,
+      }),
+    ]
+  });
+  el.innerHTML = '';
+  el.appendChild(plot);
+}
+
+// ---------------------------------------------------------------------------
+// Chart b: Price-response scatter
+// ---------------------------------------------------------------------------
+let _priceData = null;
+let _activeRegion = null;
+
+function renderPriceResponse(d) {
+  _priceData = d;
+  const regions = Object.keys(d.regions).filter(r => d.regions[r].price.length > 0);
+  const selector = document.getElementById('region-selector');
+  selector.innerHTML = '';
+
+  if (regions.length === 0) {
+    document.getElementById('chart-price').innerHTML =
+      '<p class="text-ink/40 text-center py-12">No data yet.</p>';
+    return;
+  }
+
+  regions.forEach((region, idx) => {
+    const btn = document.createElement('button');
+    btn.textContent = region;
+    btn.className = `px-3 py-1 rounded-full text-sm font-medium border transition-all ${
+      idx === 0
+        ? 'bg-teal text-white border-teal'
+        : 'bg-white text-ink border-ink/20 hover:border-teal'
+    }`;
+    btn.dataset.region = region;
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#region-selector button').forEach(b => {
+        b.className = 'px-3 py-1 rounded-full text-sm font-medium border transition-all bg-white text-ink border-ink/20 hover:border-teal';
+      });
+      btn.className = 'px-3 py-1 rounded-full text-sm font-medium border transition-all bg-teal text-white border-teal';
+      renderPriceRegion(region);
+    });
+    selector.appendChild(btn);
+    if (idx === 0) { _activeRegion = region; }
+  });
+
+  if (_activeRegion) renderPriceRegion(_activeRegion);
+}
+
+function renderPriceRegion(region) {
+  const el = document.getElementById('chart-price');
+  const rd = _priceData.regions[region];
+  if (!rd || rd.price.length === 0) {
+    el.innerHTML = `<p class="text-ink/40 text-center py-12">No data for ${region}.</p>`;
+    return;
+  }
+
+  const data = rd.price.map((p, i) => ({ price: p, net_import: rd.net_import[i] }));
+
+  const plot = window.Plot.plot({
+    width: el.parentElement.clientWidth - 32,
+    height: 340,
+    x: { label: 'Price signal seen ($/MWh)', grid: true },
+    y: { label: 'Net import (kW)', grid: true },
+    marks: [
+      window.Plot.dot(data, {
+        x: 'price', y: 'net_import',
+        r: 3,
+        fill: TEAL, fillOpacity: 0.5,
+        stroke: 'none',
+        tip: true,
+      }),
+      window.Plot.linearRegressionY(data, { x: 'price', y: 'net_import', stroke: RUST, strokeWidth: 2 }),
+    ]
+  });
+  el.innerHTML = '';
+  el.appendChild(plot);
+}
+
+// ---------------------------------------------------------------------------
+// Chart c: Envelope compliance heatmap
+// ---------------------------------------------------------------------------
+function renderEnvelopeHeatmap(d) {
+  const el = document.getElementById('chart-envelope');
+  if (!d.postcode_prefixes || d.postcode_prefixes.length === 0) {
+    el.innerHTML = '<p class="text-ink/40 text-center py-12">No data yet.</p>';
+    return;
+  }
+
+  // Flatten to array of {postcode, hour, compliance}
+  const data = [];
+  d.postcode_prefixes.forEach((pc, pi) => {
+    d.hours.forEach((h, hi) => {
+      data.push({
+        postcode: pc,
+        hour: h,
+        compliance: d.compliance[pi][hi],
+      });
+    });
+  });
+
+  const plot = window.Plot.plot({
+    width: el.parentElement.clientWidth - 32,
+    height: Math.max(120, d.postcode_prefixes.length * 36 + 60),
+    marginLeft: 60,
+    x: { label: 'Hour of day (UTC)', tickFormat: d => `${d}:00` },
+    y: { label: 'Postcode prefix', domain: d.postcode_prefixes },
+    color: {
+      type: 'sequential',
+      scheme: 'RdYlGn',
+      domain: [0, 1],
+      label: 'Compliance rate',
+      legend: true,
+    },
+    marks: [
+      window.Plot.cell(data, {
+        x: 'hour', y: 'postcode',
+        fill: 'compliance',
+        tip: true,
+        title: d => `${d.postcode} at ${d.hour}:00: ${(d.compliance * 100).toFixed(1)}% compliant`,
+      }),
+    ]
+  });
+  el.innerHTML = '';
+  el.appendChild(plot);
+}
+
+// ---------------------------------------------------------------------------
+// Chart d: Counterfactual ledger
+// ---------------------------------------------------------------------------
+function renderCounterfactual(d) {
+  // Prominent total
+  const totalEl = document.getElementById('total-savings-display');
+  if (d.total_savings != null) {
+    totalEl.textContent = `$${d.total_savings.toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+
+  const el = document.getElementById('chart-counterfactual');
+  if (!d.intervals || d.intervals.length === 0) {
+    el.innerHTML = '<p class="text-ink/40 text-center py-12">No data yet.</p>';
+    return;
+  }
+
+  const times = d.intervals.map(s => new Date(s));
+  const cumData = times.map((t, i) => ({ t, v: d.cumulative_savings[i] }));
+  const intData = times.map((t, i) => ({ t, v: d.interval_savings[i] }));
+
+  const plot = window.Plot.plot({
+    width: el.parentElement.clientWidth - 32,
+    height: 340,
+    x: { type: 'utc', label: 'Time (UTC)' },
+    y: { label: 'Cumulative savings (AUD)', grid: true },
+    marks: [
+      window.Plot.areaY(cumData, { x: 't', y: 'v', fill: GOLD, fillOpacity: 0.3 }),
+      window.Plot.lineY(cumData, { x: 't', y: 'v', stroke: GOLD, strokeWidth: 2.5, tip: true }),
+      window.Plot.ruleY([0], { stroke: INK, strokeOpacity: 0.2 }),
+    ]
+  });
+  el.innerHTML = '';
+  el.appendChild(plot);
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+async function main() {
+  try {
+    const { status, flexStack, priceResp, envelope, counterfactual } = await loadData();
+    renderStats(status);
+    renderFlexStack(flexStack);
+    renderPriceResponse(priceResp);
+    renderEnvelopeHeatmap(envelope);
+    renderCounterfactual(counterfactual);
+  } catch (err) {
+    console.error('Dashboard load error:', err);
+    document.getElementById('chart-flex').innerHTML =
+      `<p class="text-rust text-center py-12">Failed to load data: ${err.message}</p>`;
+  }
+}
+
+// Wait for Observable Plot to load
+window.addEventListener('load', () => {
+  // Small delay to ensure Plot module is imported
+  setTimeout(main, 100);
+});
+</script>
+</body>
+</html>

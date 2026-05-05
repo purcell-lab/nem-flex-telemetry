@@ -1,0 +1,69 @@
+name: Aggregate telemetry
+
+on:
+  # Run every hour
+  schedule:
+    - cron: "5 * * * *"
+  # Run on pushes to data/raw/**
+  push:
+    paths:
+      - "data/raw/**"
+  # Allow manual trigger
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  aggregate:
+    name: Aggregate and publish cohort data
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Use a PAT so the commit-back step triggers Pages deployment
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-aggregate-${{ hashFiles('scripts/requirements-aggregate.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-aggregate-
+
+      - name: Install dependencies
+        run: |
+          pip install pandas pyarrow jsonschema
+
+      - name: Ensure site/data and data/cohort directories exist
+        run: |
+          mkdir -p site/data
+          mkdir -p data/cohort/5min
+          mkdir -p data/cohort/hourly
+          mkdir -p data/cohort/daily
+
+      - name: Run aggregation script
+        run: python scripts/aggregate.py
+
+      - name: Commit cohort outputs and site data
+        run: |
+          git config user.name "nem-flex-bot"
+          git config user.email "nem-flex-bot@users.noreply.github.com"
+          git add data/cohort/ site/data/
+          # Only commit if there are changes
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore: update cohort aggregates and site data [skip ci]"
+            git push
+          fi

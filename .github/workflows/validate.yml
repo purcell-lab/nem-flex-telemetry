@@ -1,0 +1,123 @@
+name: Validate telemetry records
+
+on:
+  pull_request:
+    paths:
+      - "data/raw/**"
+  # Allow manual trigger for testing
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  validate:
+    name: Validate JSONL records against schema
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install jsonschema
+        run: pip install jsonschema
+
+      - name: Find changed JSONL files
+        id: changed_files
+        run: |
+          # Get list of JSONL files changed in this PR
+          git fetch origin ${{ github.base_ref }}
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }} HEAD -- 'data/raw/**/*.jsonl' || true)
+          echo "changed_files<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGED" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Validate changed JSONL files
+        id: validate
+        run: |
+          python - <<'PYEOF'
+          import json
+          import sys
+          import os
+          from pathlib import Path
+
+          try:
+              import jsonschema
+          except ImportError:
+              print("jsonschema not available, skipping validation")
+              sys.exit(0)
+
+          schema_path = Path("schema/telemetry.schema.json")
+          if not schema_path.exists():
+              print("Schema file not found, skipping validation")
+              sys.exit(0)
+
+          with schema_path.open() as f:
+              schema = json.load(f)
+
+          validator = jsonschema.Draft202012Validator(schema)
+
+          changed_raw = os.environ.get("CHANGED_FILES", "")
+          changed_files = [p.strip() for p in changed_raw.splitlines() if p.strip()]
+
+          if not changed_files:
+              # Validate all JSONL files if no specific list
+              changed_files = list(str(p) for p in Path("data/raw").rglob("*.jsonl"))
+
+          errors_found = 0
+          records_validated = 0
+
+          for filepath in changed_files:
+              path = Path(filepath)
+              if not path.exists() or path.suffix != ".jsonl":
+                  continue
+              with path.open() as f:
+                  for line_num, line in enumerate(f, 1):
+                      line = line.strip()
+                      if not line:
+                          continue
+                      try:
+                          record = json.loads(line)
+                      except json.JSONDecodeError as exc:
+                          print(f"ERROR {filepath}:{line_num}: JSON parse error: {exc}")
+                          errors_found += 1
+                          continue
+                      errs = list(validator.iter_errors(record))
+                      if errs:
+                          for err in errs:
+                              path_str = ".".join(str(p) for p in err.path) or "root"
+                              print(f"ERROR {filepath}:{line_num}: {path_str}: {err.message}")
+                          errors_found += len(errs)
+                      records_validated += 1
+
+          print(f"Validated {records_validated} records across {len(changed_files)} files.")
+          if errors_found:
+              print(f"FAILED: {errors_found} validation error(s) found.")
+              sys.exit(1)
+          else:
+              print("All records valid.")
+          PYEOF
+        env:
+          CHANGED_FILES: ${{ steps.changed_files.outputs.changed_files }}
+
+      - name: Post validation summary to PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const outcome = '${{ steps.validate.outcome }}';
+            const status = outcome === 'success' ? 'passed' : 'FAILED';
+            const emoji = outcome === 'success' ? 'green_circle' : 'red_circle';
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `:${emoji}: Telemetry schema validation **${status}**. See the [validate job](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.`
+            });

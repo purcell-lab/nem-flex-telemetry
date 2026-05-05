@@ -1,0 +1,15 @@
+{
+  "name": "NEM Flex Telemetry",
+  "description": "Push 5-minute demand flexibility telemetry from Home Assistant to the community NEM Flex dataset.",
+  "documentation": "https://github.com/purcell-lab/nem-flex-telemetry/blob/main/docs/INSTALL.md",
+  "issue_tracker": "https://github.com/purcell-lab/nem-flex-telemetry/issues",
+  "homeassistant": "2024.1.0",
+  "iot_class": "cloud_push",
+  "domains": ["sensor"],
+  "codeowners": ["@purcell-lab"],
+  "version": "0.1.0",
+  "zip_release": false,
+  "filename": "nem_flex_telemetry.zip",
+  "country": ["AU"],
+  "tags": ["energy", "demand-flexibility", "NEM", "HAEO", "AEMO"]
+}

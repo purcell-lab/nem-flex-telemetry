@@ -1,0 +1,78 @@
+"""NEM Flex Telemetry integration for Home Assistant.
+
+Reads HAEO demand-flexibility entities and pushes 5-minute interval
+telemetry records to the central NEM Flex Telemetry GitHub repository.
+
+Licence: MIT (code), CC-BY-4.0 (data contributed to the repo).
+Repo: https://github.com/purcell-lab/nem-flex-telemetry
+"""
+
+from __future__ import annotations
+
+import logging
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.helpers import config_validation as cv
+
+from .const import DOMAIN, PLATFORMS, SERVICE_MANUAL_PUSH
+from .coordinator import NemFlexTelemetryCoordinator
+
+_LOGGER = logging.getLogger(__name__)
+
+
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Set up the NEM Flex Telemetry component (YAML config not supported)."""
+    hass.data.setdefault(DOMAIN, {})
+    return True
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up NEM Flex Telemetry from a config entry.
+
+    Creates the DataUpdateCoordinator and forwards setup to sensor platform.
+    """
+    hass.data.setdefault(DOMAIN, {})
+
+    coordinator = NemFlexTelemetryCoordinator(hass, entry)
+    await coordinator.async_config_entry_first_refresh()
+
+    hass.data[DOMAIN][entry.entry_id] = coordinator
+
+    # Register platforms (sensor)
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Register the manual push service
+    async def handle_manual_push(call: ServiceCall) -> None:
+        """Handle a manual push service call (useful for testing)."""
+        _LOGGER.info("Manual push triggered for entry %s", entry.entry_id)
+        await coordinator.async_force_push()
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_MANUAL_PUSH,
+        handle_manual_push,
+        schema=cv.make_entity_service_schema({}),
+    )
+
+    _LOGGER.info(
+        "NEM Flex Telemetry set up for household '%s' in region %s",
+        coordinator.household_id,
+        coordinator.region,
+    )
+    return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload a NEM Flex Telemetry config entry."""
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+    if unload_ok:
+        coordinator: NemFlexTelemetryCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
+        await coordinator.async_shutdown()
+
+    # Remove service if no more entries
+    if not hass.data[DOMAIN]:
+        hass.services.async_remove(DOMAIN, SERVICE_MANUAL_PUSH)
+
+    return unload_ok

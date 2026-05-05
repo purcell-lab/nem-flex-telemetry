@@ -1,0 +1,7 @@
+manual_push:
+  name: Manual Push
+  description: >
+    Force an immediate push of the current record buffer to the central GitHub
+    repository. Useful for testing that your PAT and entity mappings are correct.
+    Under normal operation, pushes happen automatically every hour.
+  fields: {}

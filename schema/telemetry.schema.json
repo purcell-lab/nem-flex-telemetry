@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/purcell-lab/nem-flex-telemetry/blob/main/schema/telemetry.schema.json",
+  "title": "NEM Flex Telemetry Record",
+  "description": "A single 5-minute interval telemetry record from a participating household. See SCHEMA.md for full specification.",
+  "version": "0.1.0",
+  "type": "object",
+  "required": [
+    "interval_start_utc",
+    "region",
+    "postcode_prefix",
+    "net_import_kw",
+    "price_signal_seen",
+    "optimiser_setpoint_kw",
+    "flex_available_up_kw",
+    "flex_available_down_kw",
+    "storage_soc_pct",
+    "envelope_import_limit_kw",
+    "envelope_export_limit_kw",
+    "naive_baseline_kw"
+  ],
+  "properties": {
+    "interval_start_utc": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Interval start timestamp in UTC. Format: ISO8601 with Z suffix. Interval covers [interval_start_utc, interval_start_utc + 5 minutes).",
+      "examples": ["2025-06-01T03:30:00Z"]
+    },
+    "region": {
+      "type": "string",
+      "enum": ["NSW1", "QLD1", "VIC1", "SA1", "TAS1"],
+      "description": "NEM dispatch region code."
+    },
+    "postcode_prefix": {
+      "type": "string",
+      "pattern": "^[0-9]{3}$",
+      "description": "First 3 digits of the household postcode. Privacy boundary: do not include the full postcode.",
+      "examples": ["456", "200", "300"]
+    },
+    "net_import_kw": {
+      "type": "number",
+      "description": "Net power import at the grid connection point. Positive = importing from grid, negative = exporting to grid. Units: kW."
+    },
+    "price_signal_seen": {
+      "type": "number",
+      "description": "The price or tariff signal ($/MWh) used by HAEO as its objective function input for this interval. May be spot RRP, TOU tariff midpoint, or broker signal.",
+      "examples": [87.5, 300.0, -15.0]
+    },
+    "optimiser_setpoint_kw": {
+      "type": "number",
+      "description": "The setpoint (kW) commanded by HAEO for this interval. Same sign convention as net_import_kw."
+    },
+    "flex_available_up_kw": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Upward flexibility available (kW): additional load the household could absorb right now. Must be non-negative."
+    },
+    "flex_available_down_kw": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Downward flexibility available (kW): load reduction or export increase the household could deliver right now. Must be non-negative."
+    },
+    "storage_soc_pct": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Battery state of charge as a percentage (0-100). Report 0 if no battery is present."
+    },
+    "envelope_import_limit_kw": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Maximum import allowed at this moment (kW), as tracked by HAEO. May originate from DNSP export management, network constraint, inverter firmware, or tariff structure."
+    },
+    "envelope_export_limit_kw": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Maximum export allowed at this moment (kW). Positive number representing the magnitude of allowed export flow."
+    },
+    "naive_baseline_kw": {
+      "type": "number",
+      "description": "Estimated consumption (kW) without HAEO optimisation. The receipts field: enables ex-post verification of demand response. Same sign convention as net_import_kw."
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "interval_start_utc": "2025-06-01T03:30:00Z",
+      "region": "QLD1",
+      "postcode_prefix": "456",
+      "net_import_kw": 1.42,
+      "price_signal_seen": 87.50,
+      "optimiser_setpoint_kw": 1.50,
+      "flex_available_up_kw": 2.10,
+      "flex_available_down_kw": 4.30,
+      "storage_soc_pct": 72.5,
+      "envelope_import_limit_kw": 5.0,
+      "envelope_export_limit_kw": 5.0,
+      "naive_baseline_kw": 3.85
+    }
+  ]
+}
