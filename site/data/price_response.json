@@ -1,0 +1,24 @@
+{
+  "regions": {
+    "NSW1": {
+      "price": [],
+      "net_import": []
+    },
+    "QLD1": {
+      "price": [],
+      "net_import": []
+    },
+    "VIC1": {
+      "price": [],
+      "net_import": []
+    },
+    "SA1": {
+      "price": [],
+      "net_import": []
+    },
+    "TAS1": {
+      "price": [],
+      "net_import": []
+    }
+  }
+}
