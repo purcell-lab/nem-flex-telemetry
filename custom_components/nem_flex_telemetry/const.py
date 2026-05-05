@@ -193,26 +193,14 @@ DEFAULT_HAEO_ENTITIES: dict[str, dict] = {
             "Stored as positive kW magnitude."
         ),
     },
-    CONF_ENTITY_FLEX_UP: {
-        "primary": None,
-        "fallback": ["sensor.haeo_flex_up", "sensor.haeo_available_charge_power", "sensor.haeo_headroom_up"],
-        "attribute": None,
-        "unit_hint": "kW",
-        "notes": (
-            "Headroom to increase load. "
-            "Derived from battery max charge minus current setpoint if not exposed by HAEO."
-        ),
-    },
-    CONF_ENTITY_FLEX_DOWN: {
-        "primary": None,
-        "fallback": ["sensor.haeo_flex_down", "sensor.haeo_available_discharge_power", "sensor.haeo_headroom_down"],
-        "attribute": None,
-        "unit_hint": "kW",
-        "notes": (
-            "Headroom to decrease load. "
-            "Derived from battery max discharge minus current setpoint if not exposed by HAEO."
-        ),
-    },
+    # NOTE: flex_available_up_kw and flex_available_down_kw are NOT discoverable.
+    # They are derived in the coordinator from battery / EV max charge / max
+    # discharge ratings, current setpoints, SOC, and envelope limits. Surfacing
+    # them in the discovery flow would only confuse users by asking them to
+    # map sensors that do not exist in HAEO. The CONF_ENTITY_FLEX_UP /
+    # CONF_ENTITY_FLEX_DOWN keys are retained in const.py as optional
+    # power-user overrides via YAML / options, but are intentionally absent
+    # from this auto-discovery dict.
     # Shadow price entities
     CONF_ENTITY_SHADOW_LOAD_FORECAST: {
         "primary": "sensor.load_forecast_limit_shadow_price",
