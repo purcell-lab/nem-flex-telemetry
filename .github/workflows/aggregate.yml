@@ -15,12 +15,23 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
+
+# Allow only one concurrent Pages deployment.
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
 
 jobs:
   aggregate:
     name: Aggregate and publish cohort data
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Required by actions/deploy-pages@v4 for the inline Pages deploy below.
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       - name: Checkout repo
@@ -58,14 +69,40 @@ jobs:
         run: python scripts/aggregate.py
 
       - name: Commit cohort outputs and site data
+        # Use [skip ci] to prevent re-triggering this workflow on its own
+        # commit. The Pages deploy steps below run inline in this workflow,
+        # so we no longer rely on a separate pages.yml that would have been
+        # blocked by [skip ci] anyway.
         run: |
           git config user.name "nem-flex-bot"
           git config user.email "nem-flex-bot@users.noreply.github.com"
           git add data/cohort/ site/data/
-          # Only commit if there are changes
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
             git commit -m "chore: update cohort aggregates and site data [skip ci]"
             git push
           fi
+
+      # ----------------------------------------------------------------
+      # Deploy the dashboard to GitHub Pages.
+      #
+      # Rolling the Pages deploy into this workflow (rather than relying
+      # on a separate pages.yml triggered by site/** changes) sidesteps a
+      # chicken-and-egg problem: the aggregate workflow commits its own
+      # site/data updates with [skip ci] to avoid recursive triggering,
+      # which also blocks every other workflow including the Pages
+      # deploy. Doing the deploy inline keeps it firing on every fresh
+      # aggregate without re-introducing recursion risk.
+      # ----------------------------------------------------------------
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
