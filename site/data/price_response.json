@@ -20,5 +20,6 @@
       "price": [],
       "net_import": []
     }
-  }
+  },
+  "price_unit": "$/kWh"
 }

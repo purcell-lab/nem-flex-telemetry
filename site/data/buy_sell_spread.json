@@ -30,5 +30,6 @@
       "sell_price": [],
       "negative_fit_intervals": []
     }
-  }
+  },
+  "price_unit": "$/kWh"
 }
