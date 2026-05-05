@@ -61,6 +61,17 @@
 
 <body class="min-h-screen font-sans">
 
+  <!-- Demo data banner (shown only when no real cohort data yet) -->
+  <div id="demo-banner" class="hidden bg-gold/90 text-ink px-6 py-3 border-b border-ink/20">
+    <div class="max-w-6xl mx-auto flex items-center justify-between gap-4 text-sm flex-wrap">
+      <div>
+        <span class="font-semibold">Demonstration data shown.</span>
+        No households have published telemetry yet. Charts use a synthetic 24-hour sample so you can see the dashboard's intent. Real data appears automatically once the first install starts pushing.
+      </div>
+      <a href="https://github.com/purcell-lab/nem-flex-telemetry/blob/main/docs/INSTALL.md" class="font-semibold underline whitespace-nowrap">Become household 001</a>
+    </div>
+  </div>
+
   <!-- Header -->
   <header class="bg-ink text-paper px-6 py-8">
     <div class="max-w-6xl mx-auto">
@@ -269,23 +280,48 @@ async function loadData() {
     'data/buy_sell_spread.json',
   ];
 
-  async function tryLoad(url, fallbackKey) {
-    try {
-      const r = await fetch(url);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return await r.json();
-    } catch {
-      const s = await fetch('data/sample.json');
-      const sample = await s.json();
-      return sample[fallbackKey] || sample;
+  // Treat empty arrays/objects as missing-real-data and fall back to sample.
+  // The aggregator emits 200 OK files with empty arrays before any household
+  // has joined, so HTTP-status checks alone are not enough.
+  function isEmptyPayload(payload) {
+    if (payload == null) return true;
+    if (Array.isArray(payload)) return payload.length === 0;
+    if (typeof payload === 'object') {
+      // Empty if every nested array is empty AND no scalar > 0
+      const vals = Object.values(payload);
+      if (vals.length === 0) return true;
+      return vals.every(v => {
+        if (Array.isArray(v)) return v.length === 0;
+        if (typeof v === 'number') return v === 0;
+        if (typeof v === 'string') return v === '' || v === '1.1' || /^\d{4}-/.test(v);
+        return v == null;
+      });
     }
+    return false;
   }
 
+  let usingSample = false;
   let sample = {};
   try {
     const sr = await fetch('data/sample.json');
     sample = await sr.json();
   } catch { /* no sample */ }
+
+  async function tryLoad(url, fallbackKey) {
+    try {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const payload = await r.json();
+      if (isEmptyPayload(payload)) {
+        usingSample = true;
+        return sample[fallbackKey] || payload;
+      }
+      return payload;
+    } catch {
+      usingSample = true;
+      return sample[fallbackKey] || {};
+    }
+  }
 
   const [status, flexStack, priceResp, envelope, counterfactual, buySellSpread] = await Promise.all([
     tryLoad('data/status.json', 'status'),
@@ -295,6 +331,12 @@ async function loadData() {
     tryLoad('data/counterfactual.json', 'counterfactual'),
     tryLoad('data/buy_sell_spread.json', 'buy_sell_spread'),
   ]);
+
+  // Show the demo banner if anything fell back to sample data
+  if (usingSample) {
+    const banner = document.getElementById('demo-banner');
+    if (banner) banner.classList.remove('hidden');
+  }
 
   return { status, flexStack, priceResp, envelope, counterfactual, buySellSpread };
 }

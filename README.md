@@ -10,6 +10,12 @@
 
 **Status: v0.2.0.** GitHub OAuth Device Flow, 13-field schema (v1.1 adds `price_export_seen`), HAEO entity auto-discovery.
 
+## Live dashboard
+
+**[purcell-lab.github.io/nem-flex-telemetry](https://purcell-lab.github.io/nem-flex-telemetry/)**
+
+The dashboard renders the moment Pages deploys. Until the first household publishes telemetry, all five views show a synthetic 24-hour sample dataset and a banner makes the demo state explicit. Real data appears automatically once the first install starts pushing, the demo banner disappears, and the cohort-size + last-updated badges above start moving.
+
 ---
 
 ## Why this exists
