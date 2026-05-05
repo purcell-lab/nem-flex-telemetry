@@ -11,9 +11,9 @@
       },
       "identity": {
         "title": "Household identity",
-        "description": "Signed in as {github_login}. Choose a household identifier and confirm your location. The full NMI is never published, only the postcode prefix.",
+        "description": "Signed in as {github_login}. The Anonymous household identifier below is a pre-generated UUID v4 with no link to your name, address or GitHub account. Accept the default for the strongest privacy posture, or override with any non-empty label you prefer. Postcode prefix is the first three digits only; the full NMI is never published. See docs/PRIVACY.md in the repo for the threat model.",
         "data": {
-          "household_id": "Household ID",
+          "household_id": "Anonymous household identifier",
           "postcode_prefix": "Postcode prefix (first 3 digits)",
           "region": "NEM region"
         }
@@ -85,7 +85,7 @@
       "device_flow_denied": "Authorisation was denied on GitHub.",
       "device_flow_invalid": "The device code is invalid. Please try again.",
       "network": "Could not reach GitHub. Check your connection and try again.",
-      "invalid_household_id": "Household ID must be a lowercase slug (letters, digits, hyphens), 3-64 characters, not starting with a hyphen.",
+      "invalid_household_id": "Anonymous household identifier must be a non-empty string up to 128 characters.",
       "invalid_postcode_prefix": "Postcode prefix must be exactly 3 digits.",
       "entity_must_be_sensor": "Entity ID must start with 'sensor.'",
       "entity_required": "This field is required.",
