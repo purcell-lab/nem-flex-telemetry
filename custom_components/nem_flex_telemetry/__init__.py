@@ -4,7 +4,7 @@ Reads HAEO demand-flexibility entities and pushes 5-minute interval
 telemetry records to the central NEM Flex Telemetry GitHub repository.
 
 Authentication: GitHub OAuth Device Flow (v0.2.0+). No PATs to manage.
-Schema: 13-field telemetry record (schema v1.1, includes price_export_seen).
+Schema: assets[]-based telemetry record (schema v2.0, $/kWh, shadow prices).
 
 Licence: MIT (code), CC-BY-4.0 (data contributed to the repo).
 Repo: https://github.com/purcell-lab/nem-flex-telemetry
@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import logging
 
+import voluptuous as vol
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.helpers import config_validation as cv
 
 from .const import DOMAIN, PLATFORMS, SERVICE_MANUAL_PUSH, VERSION
 from .coordinator import NemFlexTelemetryCoordinator
@@ -46,7 +47,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register platforms (sensor)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # Register the manual push service (idempotent: only once per domain)
+    # Register the manual push service (idempotent: only once per domain).
+    # This is an integration-wide action with no target, so we use a plain
+    # voluptuous schema rather than ``cv.make_entity_service_schema``, which
+    # would force callers to supply entity_id / device_id / area_id / floor_id
+    # / label_id and reject calls made from Developer Tools without a target.
     if not hass.services.has_service(DOMAIN, SERVICE_MANUAL_PUSH):
         async def handle_manual_push(call: ServiceCall) -> None:
             """Handle a manual push service call (useful for testing)."""
@@ -57,11 +62,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             DOMAIN,
             SERVICE_MANUAL_PUSH,
             handle_manual_push,
-            schema=cv.make_entity_service_schema({}),
+            schema=vol.Schema({}),
         )
 
     _LOGGER.info(
-        "NEM Flex Telemetry v%s set up for household '%s' in region %s (schema v1.1)",
+        "NEM Flex Telemetry v%s set up for household '%s' in region %s (schema v2.0)",
         VERSION,
         coordinator.household_id,
         coordinator.region,
