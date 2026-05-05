@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NEM Flex Telemetry — OpenNEM for the demand side</title>
+  <title>NEM Flex Telemetry: OpenNEM for the demand side</title>
   <meta name="description" content="Community-built open-data dashboard of household demand flexibility in the National Electricity Market." />
 
   <!-- Fonts -->
@@ -124,6 +124,12 @@
       <button class="tab-btn px-4 py-3 text-sm whitespace-nowrap" data-tab="spread" role="tab" aria-selected="false">
         Buy/sell spread
       </button>
+      <button class="tab-btn px-4 py-3 text-sm whitespace-nowrap" data-tab="assets" role="tab" aria-selected="false">
+        Assets and V2G
+      </button>
+      <button class="tab-btn px-4 py-3 text-sm whitespace-nowrap" data-tab="shadow" role="tab" aria-selected="false">
+        Shadow prices
+      </button>
     </nav>
 
     <!-- Tab a: Cohort flex stack -->
@@ -145,7 +151,7 @@
       <div class="mb-4">
         <h2 class="text-xl font-semibold text-ink mb-1">Price-response curve</h2>
         <p class="text-sm text-ink/60">
-          Net import (kW) versus buy price signal seen ($/MWh), faceted by NEM region.
+          Net import (kW) versus buy price signal seen ($/kWh), faceted by NEM region.
           The negative slope makes the demand-response curve estimable from open data for the first time.
         </p>
       </div>
@@ -176,8 +182,8 @@
       <div class="mb-4">
         <h2 class="text-xl font-semibold text-ink mb-1">Counterfactual ledger</h2>
         <p class="text-sm text-ink/60">
-          Cumulative demand-response savings in AUD. From v1.1 the formula is asymmetric:
-          net-importing intervals use the buy price; net-exporting intervals use the export price.
+          Cumulative demand-response savings in AUD. The formula is asymmetric:
+          net-importing intervals use the buy price ($/kWh); net-exporting intervals use the export price ($/kWh).
           This correctly accounts for negative feed-in tariff periods.
         </p>
       </div>
@@ -199,7 +205,7 @@
       <div class="mb-4">
         <h2 class="text-xl font-semibold text-ink mb-1">Buy/sell spread</h2>
         <p class="text-sm text-ink/60">
-          Hourly mean buy price (teal) and sell/export price (gold) by NEM region.
+          Hourly mean buy price (teal) and sell/export price (gold) by NEM region, in $/kWh.
           Intervals where the export price went negative (negative feed-in tariff) are highlighted in red.
           As middle-of-day FiT collapses, this spread quantifies the asymmetry that demand-response
           programmes must account for.
@@ -220,13 +226,69 @@
       </div>
     </section>
 
+    <!-- Tab 6: Assets and V2G -->
+    <section class="tab-panel" id="tab-assets" role="tabpanel">
+      <div class="mb-4">
+        <h2 class="text-xl font-semibold text-ink mb-1">Assets and V2G</h2>
+        <p class="text-sm text-ink/60">
+          Asset mix across the cohort, EV plug duty cycle by connection state, and
+          total setpoint decomposed by asset kind. V2G discharge events appear as negative kW in the dispatch share.
+        </p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+        <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
+          <h3 class="text-sm font-semibold text-ink mb-3">Asset mix: stored kWh by kind</h3>
+          <div id="chart-asset-mix"></div>
+        </div>
+        <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
+          <h3 class="text-sm font-semibold text-ink mb-3">V2G plug duty cycle: EV connection states</h3>
+          <div id="chart-v2g-duty"></div>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
+        <h3 class="text-sm font-semibold text-ink mb-3">V2G dispatch share: setpoint by asset kind (kW)</h3>
+        <div id="chart-v2g-dispatch"></div>
+      </div>
+    </section>
+
+    <!-- Tab 7: Shadow prices -->
+    <section class="tab-panel" id="tab-shadow" role="tabpanel">
+      <div class="mb-4">
+        <h2 class="text-xl font-semibold text-ink mb-1">Shadow prices</h2>
+        <p class="text-sm text-ink/60">
+          Shadow prices reveal the marginal value the optimiser placed on energy and binding constraints.
+          Non-zero envelope shadow prices show where the network is actually constraining flex, in dollar terms.
+          Units: $/kWh.
+        </p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+        <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
+          <h3 class="text-sm font-semibold text-ink mb-3">Shadow energy price by hour of day ($/kWh)</h3>
+          <div id="chart-shadow-by-hour"></div>
+        </div>
+        <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
+          <h3 class="text-sm font-semibold text-ink mb-3">Envelope shadow: import binding by postcode prefix and hour</h3>
+          <div id="chart-shadow-import-heat"></div>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
+        <h3 class="text-sm font-semibold text-ink mb-3">Envelope shadow: export binding by postcode prefix and hour</h3>
+        <p class="text-xs text-ink/50 mb-3">Non-zero cells show hours when the export envelope was actually constraining solar dispatch, in $/kWh.</p>
+        <div id="chart-shadow-export-heat"></div>
+      </div>
+    </section>
+
   </main>
 
   <!-- Footer -->
   <footer class="bg-ink text-paper/60 px-6 py-8 mt-12">
     <div class="max-w-6xl mx-auto flex flex-col sm:flex-row justify-between gap-4 text-sm">
       <div>
-        <span class="text-paper font-semibold">NEM Flex Telemetry</span> — OpenNEM for the demand side.
+        <span class="text-paper font-semibold">NEM Flex Telemetry</span>: OpenNEM for the demand side.
         <br />Code: <a href="https://github.com/purcell-lab/nem-flex-telemetry/blob/main/LICENSE-CODE" class="text-teal hover:underline">MIT</a>.
         Data: <a href="https://creativecommons.org/licenses/by/4.0/" class="text-teal hover:underline">CC-BY-4.0</a>.
       </div>
@@ -271,14 +333,6 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 // Data loading
 // ---------------------------------------------------------------------------
 async function loadData() {
-  const urls = [
-    'data/status.json',
-    'data/cohort_flex_stack.json',
-    'data/price_response.json',
-    'data/envelope_heatmap.json',
-    'data/counterfactual.json',
-    'data/buy_sell_spread.json',
-  ];
 
   // Treat empty arrays/objects as missing-real-data and fall back to sample.
   // The aggregator emits 200 OK files with empty arrays before any household
@@ -323,13 +377,15 @@ async function loadData() {
     }
   }
 
-  const [status, flexStack, priceResp, envelope, counterfactual, buySellSpread] = await Promise.all([
+  const [status, flexStack, priceResp, envelope, counterfactual, buySellSpread, assetsSummary, shadowPrices] = await Promise.all([
     tryLoad('data/status.json', 'status'),
     tryLoad('data/cohort_flex_stack.json', 'cohort_flex_stack'),
     tryLoad('data/price_response.json', 'price_response'),
     tryLoad('data/envelope_heatmap.json', 'envelope_heatmap'),
     tryLoad('data/counterfactual.json', 'counterfactual'),
     tryLoad('data/buy_sell_spread.json', 'buy_sell_spread'),
+    tryLoad('data/assets_summary.json', 'assets_summary'),
+    tryLoad('data/shadow_prices.json', 'shadow_prices'),
   ]);
 
   // Show the demo banner if anything fell back to sample data
@@ -338,7 +394,7 @@ async function loadData() {
     if (banner) banner.classList.remove('hidden');
   }
 
-  return { status, flexStack, priceResp, envelope, counterfactual, buySellSpread };
+  return { status, flexStack, priceResp, envelope, counterfactual, buySellSpread, assetsSummary, shadowPrices };
 }
 
 // ---------------------------------------------------------------------------
@@ -388,7 +444,7 @@ function renderFlexStack(d) {
       window.Plot.lineY(priceData, {
         x: 't', y: 'v',
         stroke: GOLD, strokeWidth: 1.5, strokeDasharray: '4 2',
-        title: d => `Price: $${d.v}/MWh`,
+        title: d => `Price: $${d.v.toFixed(4)}/kWh`,
       }),
     ]
   });
@@ -450,7 +506,7 @@ function renderPriceRegion(region) {
   const plot = window.Plot.plot({
     width: el.parentElement.clientWidth - 32,
     height: 340,
-    x: { label: 'Buy price signal seen ($/MWh)', grid: true },
+    x: { label: 'Buy price signal seen ($/kWh)', grid: true },
     y: { label: 'Net import (kW)', grid: true },
     marks: [
       window.Plot.dot(data, {
@@ -621,7 +677,7 @@ function renderSpreadRegion(region) {
     height: 340,
     marginRight: 16,
     x: { type: 'utc', label: 'Time (UTC)' },
-    y: { label: 'Price ($/MWh)', grid: true },
+    y: { label: 'Price ($/kWh)', grid: true },
     color: { domain: ['Buy price', 'Export price'], range: [TEAL, GOLD], legend: true },
     marks,
   });
@@ -640,17 +696,201 @@ function renderSpreadRegion(region) {
 }
 
 // ---------------------------------------------------------------------------
+// Chart f: Asset mix donut (bar chart as Observable Plot proxy)
+// ---------------------------------------------------------------------------
+function renderAssetMix(d) {
+  const el = document.getElementById('chart-asset-mix');
+  if (!d || (!d.stationary_battery_kwh && !d.ev_kwh)) {
+    el.innerHTML = '<p class="text-ink/40 text-center py-8">No asset data yet.</p>';
+    return;
+  }
+  const data = [
+    { kind: 'Home battery', kwh: d.stationary_battery_kwh || 0 },
+    { kind: 'EV fleet',     kwh: d.ev_kwh || 0 },
+  ];
+  const plot = window.Plot.plot({
+    width: el.parentElement.clientWidth - 32,
+    height: 180,
+    marginLeft: 90,
+    x: { label: 'Stored energy (kWh)', grid: true },
+    y: { label: null },
+    color: { domain: ['Home battery', 'EV fleet'], range: [TEAL, GOLD] },
+    marks: [
+      window.Plot.barX(data, { y: 'kind', x: 'kwh', fill: 'kind', tip: true }),
+      window.Plot.ruleX([0]),
+    ]
+  });
+  el.innerHTML = '';
+  el.appendChild(plot);
+}
+
+// ---------------------------------------------------------------------------
+// Chart g: V2G plug duty cycle
+// ---------------------------------------------------------------------------
+function renderV2gDuty(d) {
+  const el = document.getElementById('chart-v2g-duty');
+  if (!d || !d.intervals || d.intervals.length === 0) {
+    el.innerHTML = '<p class="text-ink/40 text-center py-8">No EV data yet.</p>';
+    return;
+  }
+  const times = d.intervals.map(s => new Date(s));
+  const states = ['charging', 'discharging', 'plugged_idle', 'unplugged', 'driving'];
+  const colours = [TEAL, GOLD, '#93C5FD', '#CBD5E1', RUST];
+  const data = [];
+  states.forEach((s, si) => {
+    const col = `${s}_pct`;
+    if (!d[col]) return;
+    times.forEach((t, i) => {
+      data.push({ t, pct: d[col][i] || 0, state: s });
+    });
+  });
+  const plot = window.Plot.plot({
+    width: el.parentElement.clientWidth - 32,
+    height: 200,
+    x: { type: 'utc', label: 'Time (UTC)' },
+    y: { label: '% EVs', domain: [0, 100] },
+    color: { domain: states, range: colours, legend: true },
+    marks: [
+      window.Plot.areaY(data.filter(r => r.state === 'charging'),   { x: 't', y: 'pct', fill: TEAL,   fillOpacity: 0.7, tip: true }),
+      window.Plot.areaY(data.filter(r => r.state === 'discharging'),{ x: 't', y: 'pct', fill: GOLD,   fillOpacity: 0.7, tip: true }),
+      window.Plot.areaY(data.filter(r => r.state === 'plugged_idle'),{ x: 't', y: 'pct', fill: '#93C5FD', fillOpacity: 0.5, tip: true }),
+    ]
+  });
+  el.innerHTML = '';
+  el.appendChild(plot);
+}
+
+// ---------------------------------------------------------------------------
+// Chart h: V2G dispatch share
+// ---------------------------------------------------------------------------
+function renderV2gDispatch(d) {
+  const el = document.getElementById('chart-v2g-dispatch');
+  if (!d || !d.intervals || d.intervals.length === 0) {
+    el.innerHTML = '<p class="text-ink/40 text-center py-8">No dispatch data yet.</p>';
+    return;
+  }
+  const times = d.intervals.map(s => new Date(s));
+  const battData = times.map((t, i) => ({ t, v: d.battery_kw[i] || 0 }));
+  const evData   = times.map((t, i) => ({ t, v: d.ev_kw[i] || 0 }));
+  const plot = window.Plot.plot({
+    width: el.parentElement.clientWidth - 32,
+    height: 280,
+    x: { type: 'utc', label: 'Time (UTC)' },
+    y: { label: 'Setpoint (kW, + = charging, - = discharging)', grid: true },
+    marks: [
+      window.Plot.areaY(battData, { x: 't', y: 'v', fill: TEAL, fillOpacity: 0.4, tip: true }),
+      window.Plot.lineY(battData, { x: 't', y: 'v', stroke: TEAL, strokeWidth: 2 }),
+      window.Plot.areaY(evData,   { x: 't', y: 'v', fill: GOLD, fillOpacity: 0.35, tip: true }),
+      window.Plot.lineY(evData,   { x: 't', y: 'v', stroke: GOLD, strokeWidth: 2 }),
+      window.Plot.ruleY([0], { stroke: INK, strokeOpacity: 0.2 }),
+    ]
+  });
+  el.innerHTML = '';
+  el.appendChild(plot);
+}
+
+function renderAssets(assetsSummary) {
+  if (!assetsSummary) return;
+  renderAssetMix(assetsSummary.asset_mix);
+  renderV2gDuty(assetsSummary.v2g_duty_cycle);
+  renderV2gDispatch(assetsSummary.v2g_dispatch_share);
+}
+
+// ---------------------------------------------------------------------------
+// Chart i: Shadow energy price by hour of day
+// ---------------------------------------------------------------------------
+function renderShadowByHour(d) {
+  const el = document.getElementById('chart-shadow-by-hour');
+  if (!d || !d.hours) {
+    el.innerHTML = '<p class="text-ink/40 text-center py-8">No shadow data yet.</p>';
+    return;
+  }
+  const data = d.hours.map((h, i) => ({
+    hour: h,
+    mean: d.mean_shadow_energy_price[i] || 0,
+    p25:  d.p25_shadow_energy_price[i]  || 0,
+    p75:  d.p75_shadow_energy_price[i]  || 0,
+  }));
+  const plot = window.Plot.plot({
+    width: el.parentElement.clientWidth - 32,
+    height: 220,
+    x: { label: 'Hour of day (UTC)', tickFormat: h => `${h}:00` },
+    y: { label: 'Shadow energy price ($/kWh)', grid: true },
+    marks: [
+      window.Plot.areaY(data, { x: 'hour', y1: 'p25', y2: 'p75', fill: TEAL, fillOpacity: 0.3 }),
+      window.Plot.lineY(data, { x: 'hour', y: 'mean', stroke: TEAL, strokeWidth: 2.5, tip: true }),
+      window.Plot.ruleY([0], { stroke: INK, strokeOpacity: 0.15 }),
+    ]
+  });
+  el.innerHTML = '';
+  el.appendChild(plot);
+}
+
+// ---------------------------------------------------------------------------
+// Chart j: Envelope shadow heatmap
+// ---------------------------------------------------------------------------
+function renderShadowHeatmap(elId, d, prefixes, labelField) {
+  const el = document.getElementById(elId);
+  if (!d || !prefixes || prefixes.length === 0) {
+    el.innerHTML = '<p class="text-ink/40 text-center py-8">No envelope shadow data yet.</p>';
+    return;
+  }
+  const data = [];
+  prefixes.forEach((pc, pi) => {
+    for (let h = 0; h < 24; h++) {
+      data.push({ postcode: pc, hour: h, shadow: (d[pi] && d[pi][h]) || 0 });
+    }
+  });
+  const plot = window.Plot.plot({
+    width: el.parentElement.clientWidth - 32,
+    height: Math.max(100, prefixes.length * 36 + 60),
+    marginLeft: 60,
+    x: { label: 'Hour of day (UTC)', tickFormat: h => `${h}:00` },
+    y: { label: 'Postcode prefix', domain: prefixes },
+    color: {
+      type: 'sequential',
+      scheme: 'YlOrRd',
+      domain: [0, 0.05],
+      label: 'Shadow price ($/kWh)',
+      legend: true,
+    },
+    marks: [
+      window.Plot.cell(data, {
+        x: 'hour', y: 'postcode',
+        fill: 'shadow',
+        tip: true,
+        title: d => `${d.postcode} at ${d.hour}:00: $${d.shadow.toFixed(4)}/kWh`,
+      }),
+    ]
+  });
+  el.innerHTML = '';
+  el.appendChild(plot);
+}
+
+function renderShadowPrices(shadowPrices) {
+  if (!shadowPrices) return;
+  renderShadowByHour(shadowPrices.shadow_by_hour);
+  const hm = shadowPrices.envelope_shadow_heatmap;
+  if (hm) {
+    renderShadowHeatmap('chart-shadow-import-heat', hm.import_shadow, hm.postcode_prefixes, 'import');
+    renderShadowHeatmap('chart-shadow-export-heat', hm.export_shadow, hm.postcode_prefixes, 'export');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 async function main() {
   try {
-    const { status, flexStack, priceResp, envelope, counterfactual, buySellSpread } = await loadData();
+    const { status, flexStack, priceResp, envelope, counterfactual, buySellSpread, assetsSummary, shadowPrices } = await loadData();
     renderStats(status);
     renderFlexStack(flexStack);
     renderPriceResponse(priceResp);
     renderEnvelopeHeatmap(envelope);
     renderCounterfactual(counterfactual);
     renderBuySellSpread(buySellSpread);
+    renderAssets(assetsSummary);
+    renderShadowPrices(shadowPrices);
   } catch (err) {
     console.error('Dashboard load error:', err);
     document.getElementById('chart-flex').innerHTML =

@@ -2,23 +2,21 @@
 
 from __future__ import annotations
 
+import re
+
 DOMAIN = "nem_flex_telemetry"
 PLATFORMS: list[str] = ["sensor"]
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 # ---------------------------------------------------------------------------
 # OAuth Device Flow constants
 # ---------------------------------------------------------------------------
-# Replace the placeholder below with the Client ID from your GitHub OAuth App.
-# To find it: github.com/settings/applications -> your OAuth App -> Client ID.
 OAUTH_CLIENT_ID = "Ov23liYGx66fvXkXA5Vs"
 OAUTH_DEVICE_CODE_URL = "https://github.com/login/device/code"
 OAUTH_TOKEN_URL = "https://github.com/login/oauth/access_token"
-# public_repo is sufficient for writing to data/raw/<login>/** in a public repo.
-# This is narrower than the full 'repo' scope.
 OAUTH_SCOPE = "public_repo"
-OAUTH_USER_AGENT = "nem-flex-telemetry/0.2.0"
+OAUTH_USER_AGENT = "nem-flex-telemetry/0.3.0"
 
 # ---------------------------------------------------------------------------
 # Config entry keys
@@ -32,19 +30,29 @@ CONF_OPT_IN_COHORT = "opt_in_cohort"
 CONF_LICENCE_AGREED = "licence_agreed"
 CONF_CONSENT_TIMESTAMP = "consent_timestamp"
 
+# Asset capacity config keys (asked in async_step_assets)
+CONF_HOME_BATTERY_CAPACITY_KWH = "home_battery_capacity_kwh"
+CONF_EV1_CAPACITY_KWH = "ev1_capacity_kwh"
+CONF_EV2_CAPACITY_KWH = "ev2_capacity_kwh"
+
 # ---------------------------------------------------------------------------
-# Entity mapping config keys
+# Entity mapping config keys (top-level / HAEO)
 # ---------------------------------------------------------------------------
 CONF_ENTITY_NET_IMPORT = "entity_net_import_kw"
+CONF_ENTITY_SOLAR = "entity_solar_kw"
+CONF_ENTITY_TOTAL_LOAD = "entity_total_load_kw"
 CONF_ENTITY_PRICE_SIGNAL = "entity_price_signal_seen"
 CONF_ENTITY_PRICE_EXPORT = "entity_price_export_seen"
-CONF_ENTITY_SETPOINT = "entity_optimiser_setpoint_kw"
-CONF_ENTITY_FLEX_UP = "entity_flex_available_up_kw"
-CONF_ENTITY_FLEX_DOWN = "entity_flex_available_down_kw"
-CONF_ENTITY_SOC = "entity_storage_soc_pct"
 CONF_ENTITY_ENVELOPE_IMPORT = "entity_envelope_import_limit_kw"
 CONF_ENTITY_ENVELOPE_EXPORT = "entity_envelope_export_limit_kw"
-CONF_ENTITY_BASELINE = "entity_naive_baseline_kw"
+CONF_ENTITY_FLEX_UP = "entity_flex_available_up_kw"
+CONF_ENTITY_FLEX_DOWN = "entity_flex_available_down_kw"
+
+# Shadow price entity config keys
+CONF_ENTITY_SHADOW_LOAD_FORECAST = "entity_shadow_load_forecast_price"
+CONF_ENTITY_SHADOW_SOLAR_FORECAST = "entity_shadow_solar_forecast_price"
+CONF_ENTITY_SHADOW_ENVELOPE_IMPORT = "entity_shadow_envelope_import_price"
+CONF_ENTITY_SHADOW_ENVELOPE_EXPORT = "entity_shadow_envelope_export_price"
 
 # ---------------------------------------------------------------------------
 # NEM region codes
@@ -80,37 +88,45 @@ SERVICE_MANUAL_PUSH = "manual_push"
 # ---------------------------------------------------------------------------
 # Schema version
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "2.0"
 
 # ---------------------------------------------------------------------------
-# Battery flex defaults
-# Used when HAEO does not expose flex_available_up/down directly.
-# The coordinator derives headroom from battery max charge/discharge rate.
-# Override by adding sensor.battery_max_charge_power / sensor.battery_max_discharge_power
-# to your HA instance, or by setting these constants here before install.
+# Battery and EV flex defaults (kW).
+# Used for asset records and flex headroom derivation when HAEO does not
+# expose charge/discharge rate entities directly.
+# Configurable per-asset in v0.4 via options flow.
 # ---------------------------------------------------------------------------
 DEFAULT_BATTERY_MAX_CHARGE_KW: float = 5.0
 DEFAULT_BATTERY_MAX_DISCHARGE_KW: float = 5.0
+DEFAULT_EV_MAX_CHARGE_KW: float = 7.4
+DEFAULT_EV_MAX_DISCHARGE_KW: float = 7.4
 
 # Entity IDs for battery max rate sensors (if available)
 ENTITY_BATTERY_MAX_CHARGE = "sensor.battery_max_charge_power"
 ENTITY_BATTERY_MAX_DISCHARGE = "sensor.battery_max_discharge_power"
 
 # ---------------------------------------------------------------------------
-# HAEO entity auto-discovery candidates
+# GLOBAL_SWEEP_PATTERNS
 #
-# Sourced from the user's live HAEO instance (ApexCharts dashboard cross-ref).
-# These are canonical HAEO entity names as of HAEO v0.2.
+# Compiled regex patterns used in discovery.py to sweep hass.states.async_all()
+# for HAEO entities not already mapped via DEFAULT_HAEO_ENTITIES or ASSET_DEFAULTS.
+# Run at config-flow time and again at every coordinator startup (reload).
 #
-# Structure per field:
-#   primary    -- the preferred entity_id (None if not always present)
-#   fallback   -- ordered list of alternatives to try if primary is absent
-#   attribute  -- entity attribute to read (None = state value)
-#   unit_hint  -- units to expect (informational, not enforced here)
-#   notes      -- developer note for contributors
+# Any entity matching these patterns that is not already in the named-entity
+# mapping is surfaced in 'unmapped_entities' for the user to manually associate.
+# ---------------------------------------------------------------------------
+GLOBAL_SWEEP_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(r"^sensor\..*_shadow_price$"),
+    re.compile(r"^sensor\..*_state_of_charge$"),
+    re.compile(r"^sensor\..*_active_power$"),
+    re.compile(r"^number\.grid_.*$"),
+    re.compile(r"^binary_sensor\..*_(plugged|charging|connected)$"),
+)
+
+# ---------------------------------------------------------------------------
+# HAEO entity auto-discovery candidates (schema v2.0)
 #
-# Contributing default mappings for other optimisers (EMHASS, etc.) is
-# welcome via PR to https://github.com/purcell-lab/nem-flex-telemetry.
+# Prices stay in $/kWh as HAEO emits them (no /1000 conversion).
 # ---------------------------------------------------------------------------
 DEFAULT_HAEO_ENTITIES: dict[str, dict] = {
     CONF_ENTITY_NET_IMPORT: {
@@ -119,8 +135,26 @@ DEFAULT_HAEO_ENTITIES: dict[str, dict] = {
         "attribute": None,
         "unit_hint": "kW",
         "notes": (
-            "Realised grid import/export. Positive = importing, negative = exporting. "
-            "Forecast attribute available on this entity for next-interval push (v0.3)."
+            "Realised grid import/export. Positive = importing, negative = exporting."
+        ),
+    },
+    CONF_ENTITY_SOLAR: {
+        "primary": "number.solar_forecast",
+        "fallback": ["sensor.solar_forecast_power", "sensor.pv_power"],
+        "attribute": None,
+        "unit_hint": "kW",
+        "notes": (
+            "Solar generation (kW, always >= 0). Uses current state value, not forecast attribute."
+        ),
+    },
+    CONF_ENTITY_TOTAL_LOAD: {
+        "primary": "sensor.load_power",
+        "fallback": ["sensor.haeo_load_power", "sensor.total_load_power"],
+        "attribute": None,
+        "unit_hint": "kW",
+        "notes": (
+            "Total household load (kW). Used internally to derive house_load_kw. "
+            "house_load_kw = total_load - sum(deferrable current_kw), clamped to 0."
         ),
     },
     CONF_ENTITY_PRICE_SIGNAL: {
@@ -129,8 +163,7 @@ DEFAULT_HAEO_ENTITIES: dict[str, dict] = {
         "attribute": None,
         "unit_hint": "$/kWh",
         "notes": (
-            "Buy price seen by the optimiser. "
-            "Convert to $/MWh on push (multiply by 1000)."
+            "Buy price seen by the optimiser. Stored in $/kWh (no conversion)."
         ),
     },
     CONF_ENTITY_PRICE_EXPORT: {
@@ -139,47 +172,9 @@ DEFAULT_HAEO_ENTITIES: dict[str, dict] = {
         "attribute": None,
         "unit_hint": "$/kWh",
         "notes": (
-            "Sell price seen by the optimiser. Convert to $/MWh on push. "
-            "Sign: positive = paid for exports, negative = paying to export (negative-FiT event)."
+            "Sell price seen by the optimiser. Stored in $/kWh. "
+            "Positive = paid for exports; negative = negative-FiT event."
         ),
-    },
-    CONF_ENTITY_SETPOINT: {
-        "primary": "sensor.battery_active_power",
-        "fallback": ["sensor.haeo_battery_setpoint", "sensor.haeo_optimiser_setpoint"],
-        "attribute": None,
-        "unit_hint": "kW",
-        "notes": (
-            "Battery active power as the dominant flex setpoint. "
-            "Forecast attribute is the LP plan for next-interval push (v0.3)."
-        ),
-    },
-    CONF_ENTITY_FLEX_UP: {
-        "primary": None,
-        "fallback": ["sensor.haeo_flex_up", "sensor.haeo_available_charge_power", "sensor.haeo_headroom_up"],
-        "attribute": None,
-        "unit_hint": "kW",
-        "notes": (
-            "Headroom to increase load. "
-            "If not present on the HAEO instance, derived in coordinator from "
-            "battery max charge minus current setpoint, plus any deferrable load capacity."
-        ),
-    },
-    CONF_ENTITY_FLEX_DOWN: {
-        "primary": None,
-        "fallback": ["sensor.haeo_flex_down", "sensor.haeo_available_discharge_power", "sensor.haeo_headroom_down"],
-        "attribute": None,
-        "unit_hint": "kW",
-        "notes": (
-            "Headroom to decrease load. "
-            "If not present, derived from battery max discharge minus current setpoint."
-        ),
-    },
-    CONF_ENTITY_SOC: {
-        "primary": "sensor.battery_state_of_charge",
-        "fallback": ["sensor.battery_soc", "sensor.home_battery_state_of_charge"],
-        "attribute": None,
-        "unit_hint": "%",
-        "notes": "Home battery state of charge (0-100).",
     },
     CONF_ENTITY_ENVELOPE_IMPORT: {
         "primary": "number.grid_import_limit",
@@ -195,40 +190,104 @@ DEFAULT_HAEO_ENTITIES: dict[str, dict] = {
         "unit_hint": "kW",
         "notes": (
             "DNSP export envelope via CSIP-AUS or static limit. "
-            "The user's instance shows this signed negative for plotting; "
-            "we store as a positive kW limit."
+            "Stored as positive kW magnitude."
         ),
     },
-    CONF_ENTITY_BASELINE: {
-        "primary": "sensor.load_power",
-        "fallback": ["sensor.haeo_baseline_power", "sensor.haeo_naive_baseline", "sensor.haeo_counterfactual_power"],
+    CONF_ENTITY_FLEX_UP: {
+        "primary": None,
+        "fallback": ["sensor.haeo_flex_up", "sensor.haeo_available_charge_power", "sensor.haeo_headroom_up"],
         "attribute": None,
         "unit_hint": "kW",
         "notes": (
-            "Realised load as a proxy baseline. "
-            "For a true counterfactual, the LP computes a 'no flex' branch; "
-            "if HAEO exposes sensor.haeo_naive_baseline use that. "
-            "Otherwise sensor.load_power is the conservative estimate."
+            "Headroom to increase load. "
+            "Derived from battery max charge minus current setpoint if not exposed by HAEO."
         ),
+    },
+    CONF_ENTITY_FLEX_DOWN: {
+        "primary": None,
+        "fallback": ["sensor.haeo_flex_down", "sensor.haeo_available_discharge_power", "sensor.haeo_headroom_down"],
+        "attribute": None,
+        "unit_hint": "kW",
+        "notes": (
+            "Headroom to decrease load. "
+            "Derived from battery max discharge minus current setpoint if not exposed by HAEO."
+        ),
+    },
+    # Shadow price entities
+    CONF_ENTITY_SHADOW_LOAD_FORECAST: {
+        "primary": "sensor.load_forecast_limit_shadow_price",
+        "fallback": [],
+        "attribute": None,
+        "unit_hint": "$/kWh",
+        "notes": "HAEO LP dual for the load forecast constraint.",
+    },
+    CONF_ENTITY_SHADOW_SOLAR_FORECAST: {
+        "primary": "sensor.solar_forecast_limit_shadow_price",
+        "fallback": [],
+        "attribute": None,
+        "unit_hint": "$/kWh",
+        "notes": "HAEO LP dual for the solar forecast constraint.",
+    },
+    CONF_ENTITY_SHADOW_ENVELOPE_IMPORT: {
+        "primary": "sensor.grid_max_import_power_shadow_price",
+        "fallback": [],
+        "attribute": None,
+        "unit_hint": "$/kWh",
+        "notes": "HAEO LP dual for the grid import envelope constraint.",
+    },
+    CONF_ENTITY_SHADOW_ENVELOPE_EXPORT: {
+        "primary": "sensor.grid_max_export_power_shadow_price",
+        "fallback": [],
+        "attribute": None,
+        "unit_hint": "$/kWh",
+        "notes": "HAEO LP dual for the grid export envelope constraint.",
     },
 }
 
 # ---------------------------------------------------------------------------
-# Context entities: reference-only, not pushed in v0.2.
-# Discovered and logged at startup for forecast-horizon publishing in v0.3.
+# ASSET_DEFAULTS
+#
+# Per-asset entity mappings for Mark Purcell's install.
+# Each asset has kind, bidirectional_capable, and entity sources.
+# EV assets include connection_state inference metadata.
+# ---------------------------------------------------------------------------
+ASSET_DEFAULTS: dict[str, dict] = {
+    "home_battery": {
+        "kind": "stationary_battery",
+        "bidirectional_capable": True,
+        "soc_entity": "sensor.battery_state_of_charge",
+        "setpoint_entity": "sensor.battery_active_power",
+        "shadow_entity": "sensor.battery_power_balance_shadow_price",
+        "capacity_kwh": 13.5,
+        "max_charge_kw": DEFAULT_BATTERY_MAX_CHARGE_KW,
+        "max_discharge_kw": DEFAULT_BATTERY_MAX_DISCHARGE_KW,
+    },
+    "ev1": {
+        "kind": "ev",
+        "bidirectional_capable": True,
+        "soc_entity": "sensor.ev1_state_of_charge",
+        "setpoint_entity": "sensor.ev1_active_power",
+        "shadow_entity": "sensor.ev1_power_balance_shadow_price",
+        "capacity_kwh": 75.0,
+        "max_charge_kw": DEFAULT_EV_MAX_CHARGE_KW,
+        "max_discharge_kw": DEFAULT_EV_MAX_DISCHARGE_KW,
+    },
+    "ev2": {
+        "kind": "ev",
+        "bidirectional_capable": True,
+        "soc_entity": "sensor.ev2_state_of_charge",
+        "setpoint_entity": "sensor.ev2_active_power",
+        "shadow_entity": "sensor.ev2_power_balance_shadow_price",
+        "capacity_kwh": 60.0,
+        "max_charge_kw": DEFAULT_EV_MAX_CHARGE_KW,
+        "max_discharge_kw": DEFAULT_EV_MAX_DISCHARGE_KW,
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Context entities: reference-only, not pushed in v0.3.
 # ---------------------------------------------------------------------------
 CONTEXT_ENTITIES: dict[str, dict] = {
-    "pv_forecast": {
-        "primary": "number.solar_forecast",
-        "fallback": ["sensor.solar_forecast_power"],
-        "notes": "Solar forecast (kW). HAEO publishes forecast attribute for next 7 days.",
-    },
-    "load_forecast": {
-        "primary": "sensor.load_power",
-        "fallback": ["sensor.haeo_load_forecast"],
-        "notes": "Load forecast (kW) via forecast attribute.",
-    },
-    # Regional PD7day forecast: auto-selected by region in discovery.py
     "regional_price_forecast": {
         "primary": "sensor.qld1_pd7day_forecast",
         "fallback": [
@@ -237,20 +296,7 @@ CONTEXT_ENTITIES: dict[str, dict] = {
             "sensor.sa1_pd7day_forecast",
             "sensor.tas1_pd7day_forecast",
         ],
-        "notes": (
-            "AEMO PD 7-day regional price forecast. "
-            "Region-specific: auto-selected from the region set in the identity step."
-        ),
-    },
-    "ev1_soc": {
-        "primary": "sensor.ev1_state_of_charge",
-        "fallback": [],
-        "notes": "EV1 SOC. Optional context for V2G flex inference.",
-    },
-    "ev2_soc": {
-        "primary": "sensor.ev2_state_of_charge",
-        "fallback": [],
-        "notes": "EV2 SOC. Optional context for V2G flex inference.",
+        "notes": "AEMO PD 7-day regional price forecast. Region-specific: auto-selected from the region set in the identity step.",
     },
 }
 
@@ -265,7 +311,6 @@ REGION_PD7DAY_ENTITY: dict[str, str] = {
 
 # ---------------------------------------------------------------------------
 # DEFAULT_ENTITY_MAPPINGS: primary candidate per field for UI defaults.
-# None for fields where primary is not always present (flex headroom).
 # ---------------------------------------------------------------------------
 DEFAULT_ENTITY_MAPPINGS: dict[str, str] = {
     key: spec["primary"] or (spec["fallback"][0] if spec["fallback"] else "")

@@ -10,6 +10,12 @@ On startup of the config flow, this module scans the running Home Assistant
 instance for known entity IDs in priority order. The first match for each
 field wins.
 
+In addition, a global sweep (run_global_sweep) walks hass.states.async_all()
+matching GLOBAL_SWEEP_PATTERNS and surfaces any entity not already in the
+named-entity mapping as 'unmapped_entities'. This sweep is also re-run on
+every coordinator startup so newly added HAEO entities are picked up
+automatically without requiring the user to reconfigure.
+
 If your HAEO instance uses different entity names, the integration falls back
 to a partial or full manual mapping step in the config flow. Contributing
 default mappings for other optimisers (EMHASS, etc.) is welcome via PR to
@@ -27,12 +33,17 @@ discover_haeo_entities() returns two dicts:
         priority order. Used to populate EntitySelector dropdowns in the
         partial and manual override steps.
 
+run_global_sweep() returns:
+
+    unmapped_entities: list[str]
+        Entity IDs that match GLOBAL_SWEEP_PATTERNS but are not already covered
+        by any named mapping. These are surfaced in the config flow for manual
+        association.
+
 discover_context_entities() returns:
 
     context: {context_key: entity_id | None}
-        Best match for each reference-only context entity. Not pushed in v0.2.
-        Logged at INFO for visibility. The regional_price_forecast entity is
-        auto-selected based on the region passed in.
+        Best match for each reference-only context entity.
 """
 
 from __future__ import annotations
@@ -43,10 +54,12 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 
 from .const import (
+    ASSET_DEFAULTS,
     CONF_ENTITY_FLEX_DOWN,
     CONF_ENTITY_FLEX_UP,
     CONTEXT_ENTITIES,
     DEFAULT_HAEO_ENTITIES,
+    GLOBAL_SWEEP_PATTERNS,
     REGION_PD7DAY_ENTITY,
 )
 
@@ -73,7 +86,6 @@ async def discover_haeo_entities(
         - candidates: dict mapping each config key to a list of all candidate
           entity_ids that actually exist on this instance (in priority order).
     """
-    # Check whether the HAEO integration is loaded and warn if not.
     haeo_entries = hass.config_entries.async_entries(_HAEO_DOMAIN)
     if haeo_entries:
         _LOGGER.debug(
@@ -92,7 +104,6 @@ async def discover_haeo_entities(
     candidates: dict[str, list[str]] = {}
 
     for field_key, spec in DEFAULT_HAEO_ENTITIES.items():
-        # Build the ordered candidate list: primary first, then fallbacks
         candidate_list: list[str] = []
         if spec.get("primary"):
             candidate_list.append(spec["primary"])
@@ -107,9 +118,7 @@ async def discover_haeo_entities(
                 found_candidates.append(entity_id)
                 if first_match is None:
                     first_match = entity_id
-                    _LOGGER.debug(
-                        "Auto-discovered %s -> %s", field_key, entity_id
-                    )
+                    _LOGGER.debug("Auto-discovered %s -> %s", field_key, entity_id)
 
         best[field_key] = first_match
         candidates[field_key] = found_candidates
@@ -130,20 +139,81 @@ async def discover_haeo_entities(
     return best, candidates
 
 
+def run_global_sweep(
+    hass: HomeAssistant,
+    already_mapped: set[str] | None = None,
+) -> list[str]:
+    """Sweep all HA states for entities matching GLOBAL_SWEEP_PATTERNS.
+
+    Any entity that matches at least one pattern and is not already in the
+    'already_mapped' set is added to the returned 'unmapped_entities' list.
+
+    This is called at config-flow discovery time and again on every coordinator
+    startup, so newly added HAEO entities are surfaced without reconfiguring.
+
+    Args:
+        hass: The Home Assistant instance.
+        already_mapped: Set of entity_ids already assigned to a schema field
+                        or asset. If None, defaults to the union of all primary
+                        and fallback entities from DEFAULT_HAEO_ENTITIES plus
+                        ASSET_DEFAULTS entity references.
+
+    Returns:
+        Sorted list of entity_ids that matched a sweep pattern but are not
+        already mapped.
+    """
+    if already_mapped is None:
+        already_mapped = _build_known_entity_set()
+
+    matched: list[str] = []
+    for state in hass.states.async_all():
+        eid = state.entity_id
+        if eid in already_mapped:
+            continue
+        for pattern in GLOBAL_SWEEP_PATTERNS:
+            if pattern.match(eid):
+                matched.append(eid)
+                break
+
+    matched.sort()
+
+    if matched:
+        _LOGGER.info(
+            "Global sweep found %d unmapped entit%s: %s",
+            len(matched),
+            "y" if len(matched) == 1 else "ies",
+            ", ".join(matched),
+        )
+    else:
+        _LOGGER.debug("Global sweep: no unmapped entities found.")
+
+    return matched
+
+
+def _build_known_entity_set() -> set[str]:
+    """Build the set of all entity IDs already referenced in named mappings."""
+    known: set[str] = set()
+    for spec in DEFAULT_HAEO_ENTITIES.values():
+        if spec.get("primary"):
+            known.add(spec["primary"])
+        known.update(spec.get("fallback", []))
+    for asset_spec in ASSET_DEFAULTS.values():
+        for key in ("soc_entity", "setpoint_entity", "shadow_entity"):
+            val = asset_spec.get(key)
+            if val:
+                known.add(val)
+    return known
+
+
 async def discover_context_entities(
     hass: HomeAssistant,
     region: str | None = None,
 ) -> dict[str, str | None]:
-    """Discover reference-only context entities (not pushed in v0.2).
-
-    These are logged at INFO for operator visibility and stored in coordinator
-    state for forecast-horizon publishing in v0.3.
+    """Discover reference-only context entities.
 
     Args:
         hass: The Home Assistant instance.
-        region: The NEM region code from the identity step. If provided,
-                overrides the default regional_price_forecast entity with
-                the region-specific PD7day forecast entity.
+        region: The NEM region code from the identity step.
 
     Returns:
         dict mapping context key to the best matched entity_id or None.
@@ -151,7 +221,6 @@ async def discover_context_entities(
     context: dict[str, str | None] = {}
 
     for ctx_key, spec in CONTEXT_ENTITIES.items():
-        # Special handling: regional_price_forecast is auto-selected by region
         if ctx_key == "regional_price_forecast" and region:
             region_entity = REGION_PD7DAY_ENTITY.get(region.upper())
             if region_entity and hass.states.get(region_entity) is not None:
@@ -162,7 +231,6 @@ async def discover_context_entities(
                     region,
                 )
                 continue
-            # Fall through to normal candidate search if region entity not present
 
         candidate_list: list[str] = []
         if spec.get("primary"):
@@ -177,12 +245,10 @@ async def discover_context_entities(
 
         context[ctx_key] = first_match
         if first_match:
-            _LOGGER.info(
-                "Context entity %s -> %s (v0.3 forecast horizon)", ctx_key, first_match
-            )
+            _LOGGER.info("Context entity %s -> %s", ctx_key, first_match)
         else:
             _LOGGER.debug(
-                "Context entity %s not found (tried: %s). Will be absent from v0.3 push.",
+                "Context entity %s not found (tried: %s).",
                 ctx_key,
                 ", ".join(candidate_list) if candidate_list else "none",
             )
@@ -216,10 +282,6 @@ def build_entity_map(
     overrides: dict[str, Any],
 ) -> dict[str, str]:
     """Merge auto-discovered entities with manual overrides from the form.
-
-    Auto-discovered values are used for fields not present in overrides.
-    Fields still None after merging are omitted (coordinator validation will
-    log a warning for those fields at runtime).
 
     Args:
         best: The 'best' dict returned by discover_haeo_entities().

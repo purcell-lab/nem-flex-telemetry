@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   validate:
-    name: Validate JSONL records against schema
+    name: Validate JSONL records against schema v2.0
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -39,13 +39,11 @@ jobs:
       - name: Find changed paths under data/raw/**
         id: changed_files
         run: |
-          # Determine the diff base: PR base ref or push parent commit
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE="${{ github.event.pull_request.base.sha }}"
           else
             BASE="${{ github.event.before }}"
           fi
-          # Fallback if before is all-zeros (first push to branch)
           if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
             BASE=$(git rev-list --max-parents=0 HEAD)
           fi
@@ -57,10 +55,6 @@ jobs:
 
       # ------------------------------------------------------------------
       # Step: Path-scope enforcement
-      # Every changed path under data/raw/** must be exactly
-      #   data/raw/<author-login>/<anything>
-      # where <author-login> is the GitHub login of the PR author (for PRs)
-      # or the pusher login (for direct pushes to main from household forks).
       # ------------------------------------------------------------------
       - name: Enforce path scope (household can only write to their own folder)
         id: path_scope
@@ -68,7 +62,6 @@ jobs:
           python3 - <<'PYEOF'
           import os, sys
 
-          # Determine the authorised login
           event = os.environ.get("GITHUB_EVENT_NAME", "")
           if event == "pull_request":
               login = os.environ.get("PR_LOGIN", "").strip().lower()
@@ -89,10 +82,8 @@ jobs:
           allowed_prefix = f"data/raw/{login}/"
 
           for path in changed_files:
-              # Only enforce for paths under data/raw/
               if not path.startswith("data/raw/"):
                   continue
-              # Allow data/raw/.gitkeep (repo scaffolding)
               if path in ("data/raw/.gitkeep",):
                   continue
               if not path.startswith(allowed_prefix):
@@ -103,7 +94,6 @@ jobs:
               for v in violations:
                   print(f"  {v}")
               print(f"\nThis token can only write to data/raw/{login}/**")
-              print("Your commit has been rejected. Each household may only write to their own folder.")
               sys.exit(1)
           else:
               print(f"Path scope OK: all {len(changed_files)} changed path(s) are under data/raw/{login}/")
@@ -128,8 +118,6 @@ jobs:
 
       # ------------------------------------------------------------------
       # Step: Date range enforcement
-      # Records must not be backdated more than 7 days.
-      # Records must not be post-dated into the future.
       # ------------------------------------------------------------------
       - name: Enforce record date range (max 7 days backdating, no future records)
         id: date_check
@@ -196,9 +184,13 @@ jobs:
           CHANGED_FILES: ${{ steps.changed_files.outputs.changed_files }}
 
       # ------------------------------------------------------------------
-      # Step: JSON Schema validation
+      # Step: Schema v2.0 validation
+      # Checks:
+      #   - schema_version field == '2.0' (v1.x records are rejected)
+      #   - JSON Schema validates (additionalProperties: false at top level)
+      #   - All price fields are in $/kWh range (-2.0 to 20.0)
       # ------------------------------------------------------------------
-      - name: Validate changed JSONL files against schema v1.1
+      - name: Validate changed JSONL files against schema v2.0
         id: validate
         run: |
           python3 - <<'PYEOF'
@@ -220,6 +212,19 @@ jobs:
               schema = json.load(f)
 
           validator = jsonschema.Draft202012Validator(schema)
+
+          # Price fields that must be in $/kWh range (-2.0 to 20.0)
+          PRICE_FIELDS = [
+              "price_signal_seen",
+              "price_export_seen",
+              "shadow_energy_price",
+              "shadow_load_forecast_price",
+              "shadow_solar_forecast_price",
+              "shadow_envelope_import_price",
+              "shadow_envelope_export_price",
+          ]
+          PRICE_MIN = -2.0
+          PRICE_MAX = 20.0
 
           changed_raw = os.environ.get("CHANGED_FILES", "")
           changed_files = [p.strip() for p in changed_raw.splitlines() if p.strip()]
@@ -245,12 +250,44 @@ jobs:
                           print(f"ERROR {filepath}:{line_num}: JSON parse error: {exc}")
                           errors_found += 1
                           continue
+
+                      # Reject v1.x records (clean break)
+                      sv = record.get("schema_version")
+                      if sv != "2.0":
+                          print(
+                              f"ERROR {filepath}:{line_num}: schema_version={sv!r} is not '2.0'. "
+                              f"v1.x records are not accepted in this repository."
+                          )
+                          errors_found += 1
+                          continue
+
+                      # JSON Schema validation
                       errs = list(validator.iter_errors(record))
                       if errs:
                           for err in errs:
                               path_str = ".".join(str(p) for p in err.path) or "root"
                               print(f"ERROR {filepath}:{line_num}: {path_str}: {err.message}")
                           errors_found += len(errs)
+                          records_validated += 1
+                          continue
+
+                      # Explicit $/kWh range check on price fields
+                      for field in PRICE_FIELDS:
+                          val = record.get(field)
+                          if val is None:
+                              continue
+                          try:
+                              fval = float(val)
+                          except (TypeError, ValueError):
+                              continue
+                          if not (PRICE_MIN <= fval <= PRICE_MAX):
+                              print(
+                                  f"ERROR {filepath}:{line_num}: {field}={fval} is outside "
+                                  f"allowed $/kWh range [{PRICE_MIN}, {PRICE_MAX}]. "
+                                  f"Prices must be in $/kWh (not $/MWh)."
+                              )
+                              errors_found += 1
+
                       records_validated += 1
 
           print(f"Validated {records_validated} records across {len(changed_files)} file(s).")
@@ -268,8 +305,8 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const pathOutcome  = '${{ steps.path_scope.outcome }}';
-            const dateOutcome  = '${{ steps.date_check.outcome }}';
+            const pathOutcome   = '${{ steps.path_scope.outcome }}';
+            const dateOutcome   = '${{ steps.date_check.outcome }}';
             const schemaOutcome = '${{ steps.validate.outcome }}';
 
             const allPassed = [pathOutcome, dateOutcome, schemaOutcome].every(o => o === 'success');
@@ -283,7 +320,7 @@ jobs:
               `|---|---|`,
               `| Path scope | ${pathOutcome === 'success' ? 'PASS' : 'FAIL'} |`,
               `| Date range (max 7 days backdating) | ${dateOutcome === 'success' ? 'PASS' : 'FAIL'} |`,
-              `| Schema v1.1 | ${schemaOutcome === 'success' ? 'PASS' : 'FAIL'} |`,
+              `| Schema v2.0 ($/kWh range, schema_version check) | ${schemaOutcome === 'success' ? 'PASS' : 'FAIL'} |`,
               '',
               `See the [validate job](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.`
             ];

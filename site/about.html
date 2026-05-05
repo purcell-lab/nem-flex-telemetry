@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>About — NEM Flex Telemetry</title>
+  <title>About: NEM Flex Telemetry</title>
   <meta name="description" content="About the NEM Flex Telemetry project: open-data household demand flexibility for the National Electricity Market." />
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -97,18 +97,27 @@
             </tr>
           </thead>
           <tbody>
+            <tr><td><code>schema_version</code></td><td>string</td><td>literal "2.0"</td><td>Schema version guard, rejects v1.x records</td></tr>
             <tr><td><code>interval_start_utc</code></td><td>string</td><td>ISO8601 UTC</td><td>Interval start timestamp</td></tr>
             <tr><td><code>region</code></td><td>string</td><td>NEM code</td><td>NSW1, QLD1, VIC1, SA1, TAS1</td></tr>
             <tr><td><code>postcode_prefix</code></td><td>string</td><td>3 digits</td><td>First 3 digits of postcode only (privacy boundary)</td></tr>
             <tr><td><code>net_import_kw</code></td><td>number</td><td>kW, signed</td><td>Net grid import (+) or export (-)</td></tr>
-            <tr><td><code>price_signal_seen</code></td><td>number</td><td>$/MWh</td><td>Price or tariff signal used by HAEO optimiser</td></tr>
+            <tr><td><code>price_signal_seen</code></td><td>number</td><td>$/kWh</td><td>Buy price or tariff signal seen by HAEO optimiser</td></tr>
+            <tr><td><code>price_export_seen</code></td><td>number</td><td>$/kWh</td><td>Export (FiT) price seen by HAEO optimiser</td></tr>
+            <tr><td><code>buy_sell_spread</code></td><td>number</td><td>$/kWh</td><td>Derived spread: price_signal_seen minus price_export_seen</td></tr>
             <tr><td><code>optimiser_setpoint_kw</code></td><td>number</td><td>kW, signed</td><td>Setpoint commanded by HAEO</td></tr>
             <tr><td><code>flex_available_up_kw</code></td><td>number</td><td>kW, &ge;0</td><td>Additional load the household could absorb now</td></tr>
             <tr><td><code>flex_available_down_kw</code></td><td>number</td><td>kW, &ge;0</td><td>Load reduction or export increase available now</td></tr>
             <tr><td><code>storage_soc_pct</code></td><td>number</td><td>%, 0-100</td><td>Battery state of charge</td></tr>
             <tr><td><code>envelope_import_limit_kw</code></td><td>number</td><td>kW, &ge;0</td><td>Max allowed import (DNSP or firmware constraint)</td></tr>
             <tr><td><code>envelope_export_limit_kw</code></td><td>number</td><td>kW, &ge;0</td><td>Max allowed export</td></tr>
+            <tr><td><code>shadow_price_import</code></td><td>number&nbsp;|&nbsp;null</td><td>$/kWh</td><td>LP dual on import envelope constraint</td></tr>
+            <tr><td><code>shadow_price_export</code></td><td>number&nbsp;|&nbsp;null</td><td>$/kWh</td><td>LP dual on export envelope constraint</td></tr>
+            <tr><td><code>shadow_price_soc_min</code></td><td>number&nbsp;|&nbsp;null</td><td>$/kWh</td><td>LP dual on minimum SOC constraint</td></tr>
+            <tr><td><code>shadow_price_soc_max</code></td><td>number&nbsp;|&nbsp;null</td><td>$/kWh</td><td>LP dual on maximum SOC constraint</td></tr>
             <tr><td><code>naive_baseline_kw</code></td><td>number</td><td>kW, signed</td><td>Estimated consumption without optimisation (the receipts field)</td></tr>
+            <tr><td><code>assets[]</code></td><td>array</td><td></td><td>Per-asset records (battery, EV chargers). See SCHEMA.md.</td></tr>
+            <tr><td><code>deferrable_loads[]</code></td><td>array</td><td></td><td>Shiftable appliance loads reported by HAEO</td></tr>
           </tbody>
         </table>
       </div>
@@ -205,7 +214,7 @@
   <footer class="bg-ink text-paper/60 px-6 py-8 mt-12">
     <div class="max-w-4xl mx-auto flex flex-col sm:flex-row justify-between gap-4 text-sm">
       <div>
-        <span class="text-paper font-semibold">NEM Flex Telemetry</span> — OpenNEM for the demand side.
+        <span class="text-paper font-semibold">NEM Flex Telemetry</span>: OpenNEM for the demand side.
         <br />Code: <a href="https://github.com/purcell-lab/nem-flex-telemetry/blob/main/LICENSE-CODE" class="text-teal hover:underline">MIT</a>.
         Data: <a href="https://creativecommons.org/licenses/by/4.0/" class="text-teal hover:underline">CC-BY-4.0</a>.
       </div>

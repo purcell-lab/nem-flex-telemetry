@@ -1,19 +1,21 @@
 """Config flow for NEM Flex Telemetry integration.
 
 Flow steps (initial setup):
-  1. async_step_user          -- landing page, explains Device Flow
-  2. async_step_device_auth   -- requests device code from GitHub
-  3. async_step_show_code     -- shows user_code, polls for token in background
-  4. async_step_identity      -- household ID, postcode prefix, NEM region
+  1. async_step_user              -- landing page, explains Device Flow
+  2. async_step_device_auth       -- requests device code from GitHub
+  3. async_step_show_code         -- shows user_code, polls for token in background
+  4. async_step_identity          -- household ID, postcode prefix, NEM region
   5. async_step_entities_confirm  -- all HAEO entities auto-detected (confirm or customise)
      async_step_entities_partial  -- some entities missing (pre-filled + missing fields)
      async_step_entities_manual   -- no HAEO detected (full manual form)
-  6. async_step_consent       -- CC-BY-4.0 licence + cohort participation
-  7. async_step_auth_error    -- Device Flow failure with retry/abort options
+  6. async_step_assets            -- discovered assets summary, EV/battery capacity config,
+                                     unmapped entity report
+  7. async_step_consent           -- CC-BY-4.0 licence + cohort participation
+  8. async_step_auth_error        -- Device Flow failure with retry/abort options
 
 Re-authentication flow (triggered when the coordinator detects a 401):
-  R1. async_step_reauth        -- entry point registered by HA
-  R2. async_step_reauth_confirm -- skip straight to device_auth -> show_code -> done
+  R1. async_step_reauth           -- entry point registered by HA
+  R2. async_step_reauth_confirm   -- skip straight to device_auth -> show_code -> done
 """
 
 from __future__ import annotations
@@ -31,17 +33,25 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import selector
 
 from .const import (
+    ASSET_DEFAULTS,
     CONF_CONSENT_TIMESTAMP,
-    CONF_ENTITY_BASELINE,
     CONF_ENTITY_ENVELOPE_EXPORT,
     CONF_ENTITY_ENVELOPE_IMPORT,
     CONF_ENTITY_FLEX_DOWN,
     CONF_ENTITY_FLEX_UP,
     CONF_ENTITY_NET_IMPORT,
     CONF_ENTITY_PRICE_SIGNAL,
-    CONF_ENTITY_SETPOINT,
-    CONF_ENTITY_SOC,
+    CONF_ENTITY_PRICE_EXPORT,
+    CONF_ENTITY_SHADOW_ENVELOPE_EXPORT,
+    CONF_ENTITY_SHADOW_ENVELOPE_IMPORT,
+    CONF_ENTITY_SHADOW_LOAD_FORECAST,
+    CONF_ENTITY_SHADOW_SOLAR_FORECAST,
+    CONF_ENTITY_SOLAR,
+    CONF_ENTITY_TOTAL_LOAD,
+    CONF_EV1_CAPACITY_KWH,
+    CONF_EV2_CAPACITY_KWH,
     CONF_GITHUB_LOGIN,
+    CONF_HOME_BATTERY_CAPACITY_KWH,
     CONF_HOUSEHOLD_ID,
     CONF_LICENCE_AGREED,
     CONF_OPT_IN_COHORT,
@@ -61,7 +71,12 @@ from .device_flow import (
     DeviceFlowSession,
     fetch_authenticated_user,
 )
-from .discovery import build_entity_map, classify_discovery_result, discover_haeo_entities
+from .discovery import (
+    build_entity_map,
+    classify_discovery_result,
+    discover_haeo_entities,
+    run_global_sweep,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -109,7 +124,7 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     Guides the user through GitHub Device Flow authorisation, household
     identity capture, HAEO entity auto-discovery (with manual fallback),
-    and consent.
+    asset configuration, and consent.
     """
 
     VERSION = 2
@@ -121,11 +136,12 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._auth_error: str = ""
         self._discovery_best: dict[str, str | None] = {}
         self._discovery_candidates: dict[str, list[str]] = {}
+        self._unmapped_entities: list[str] = []
         self._is_reauth: bool = False
         self._reauth_entry_id: str | None = None
 
     # -----------------------------------------------------------------------
-    # Step 1: Landing page (explains Device Flow, single Continue button)
+    # Step 1: Landing page
     # -----------------------------------------------------------------------
 
     async def async_step_user(
@@ -194,11 +210,7 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def _poll_for_token(self) -> None:
-        """Background task: poll GitHub for the access token.
-
-        On success: stores token + user info, advances to identity step.
-        On failure: stores error reason, advances to auth_error step.
-        """
+        """Background task: poll GitHub for the access token."""
         session = DeviceFlowSession()
         df = self._device_flow
         try:
@@ -231,11 +243,7 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_identity(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Collect household ID, postcode prefix, and NEM region.
-
-        github_login is pre-filled from the OAuth user fetch and displayed
-        as a read-only description placeholder. The user cannot change it here.
-        """
+        """Collect household ID, postcode prefix, and NEM region."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -251,7 +259,6 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             if not errors:
                 self._data.update(user_input)
-                # Proceed to entity discovery
                 return await self._async_step_entities_start()
 
         schema = vol.Schema(
@@ -275,10 +282,18 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # -----------------------------------------------------------------------
 
     async def _async_step_entities_start(self) -> FlowResult:
-        """Run discovery and route to the appropriate entity step."""
+        """Run discovery, global sweep, and route to the appropriate entity step."""
         self._discovery_best, self._discovery_candidates = (
             await discover_haeo_entities(self.hass)
         )
+        # Build the set of already-mapped entities for the sweep
+        already_mapped = set(
+            v for v in self._discovery_best.values() if v is not None
+        )
+        self._unmapped_entities = run_global_sweep(
+            self.hass, already_mapped=already_mapped
+        )
+
         mode, missing = classify_discovery_result(self._discovery_best)
 
         if mode == "all":
@@ -297,13 +312,10 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """All HAEO entities detected. Show summary and offer confirm or customise."""
         if user_input is not None:
             if user_input.get("customise"):
-                # User wants to manually override: drop to the full manual form
                 return await self.async_step_entities_manual()
-            # Accept auto-detected mapping
             self._data.update(self._discovery_best)  # type: ignore[arg-type]
-            return await self.async_step_consent()
+            return await self.async_step_assets()
 
-        # Build a readable summary for description_placeholders
         summary_lines = [
             f"{k}: {v}" for k, v in self._discovery_best.items() if v is not None
         ]
@@ -330,19 +342,19 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             merged = build_entity_map(self._discovery_best, user_input)
-            # Validate all missing fields were provided
             for field in missing:
                 if field not in merged or not merged[field]:
                     errors[field] = "entity_required"
             if not errors:
                 self._data.update(merged)
-                return await self.async_step_consent()
+                return await self.async_step_assets()
 
-        # Schema only asks for missing fields (auto-detected ones are not shown)
         partial_defaults = {
-            field: self._discovery_candidates.get(field, [DEFAULT_ENTITY_MAPPINGS.get(field, "")])[0]
-            if self._discovery_candidates.get(field)
-            else DEFAULT_ENTITY_MAPPINGS.get(field, "")
+            field: (
+                self._discovery_candidates.get(field, [DEFAULT_ENTITY_MAPPINGS.get(field, "")])[0]
+                if self._discovery_candidates.get(field)
+                else DEFAULT_ENTITY_MAPPINGS.get(field, "")
+            )
             for field in missing
         }
         return self.async_show_form(
@@ -366,14 +378,13 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         all_fields = list(DEFAULT_ENTITY_MAPPINGS.keys())
 
         if user_input is not None:
-            # Validate all fields were provided and look like sensor entities
             for field in all_fields:
                 val = user_input.get(field, "")
                 if not val:
                     errors[field] = "entity_required"
             if not errors:
                 self._data.update(user_input)
-                return await self.async_step_consent()
+                return await self.async_step_assets()
 
         return self.async_show_form(
             step_id="entities_manual",
@@ -385,7 +396,75 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # -----------------------------------------------------------------------
-    # Step 6: Consent (CC-BY-4.0 + cohort participation)
+    # Step 6: Assets summary and capacity configuration
+    # -----------------------------------------------------------------------
+
+    async def async_step_assets(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Show discovered assets and ask for EV and battery capacity.
+
+        Displays a read-only summary of the assets in ASSET_DEFAULTS, shows
+        any unmapped entities from the global sweep, and collects capacity
+        values for home_battery, ev1, and ev2 (since HAEO may not expose them).
+
+        A 'Some of my assets are missing' path is not yet a separate step in
+        v0.3 but the unmapped_entities list is stored in the config data for
+        the coordinator to surface.
+        """
+        if user_input is not None:
+            # Save capacity values and unmapped entity list
+            self._data[CONF_HOME_BATTERY_CAPACITY_KWH] = float(
+                user_input.get(CONF_HOME_BATTERY_CAPACITY_KWH, 13.5)
+            )
+            self._data[CONF_EV1_CAPACITY_KWH] = float(
+                user_input.get(CONF_EV1_CAPACITY_KWH, 75.0)
+            )
+            self._data[CONF_EV2_CAPACITY_KWH] = float(
+                user_input.get(CONF_EV2_CAPACITY_KWH, 60.0)
+            )
+            # Store unmapped entity list for coordinator to surface
+            self._data["unmapped_entities"] = self._unmapped_entities
+            return await self.async_step_consent()
+
+        # Build asset summary for description_placeholders
+        asset_lines = []
+        for asset_id, spec in ASSET_DEFAULTS.items():
+            asset_lines.append(
+                f"{asset_id} ({spec['kind']}): "
+                f"soc={spec.get('soc_entity', 'n/a')}, "
+                f"setpoint={spec.get('setpoint_entity', 'n/a')}"
+            )
+        asset_summary = "\n".join(asset_lines)
+
+        unmapped_summary = (
+            ", ".join(self._unmapped_entities) if self._unmapped_entities else "none"
+        )
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_HOME_BATTERY_CAPACITY_KWH, default=13.5
+                ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=500.0)),
+                vol.Required(
+                    CONF_EV1_CAPACITY_KWH, default=75.0
+                ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=500.0)),
+                vol.Required(
+                    CONF_EV2_CAPACITY_KWH, default=60.0
+                ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=500.0)),
+            }
+        )
+        return self.async_show_form(
+            step_id="assets",
+            data_schema=schema,
+            description_placeholders={
+                "asset_summary": asset_summary,
+                "unmapped_entities": unmapped_summary,
+            },
+        )
+
+    # -----------------------------------------------------------------------
+    # Step 7: Consent (CC-BY-4.0 + cohort participation)
     # -----------------------------------------------------------------------
 
     async def async_step_consent(
@@ -402,7 +481,6 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._data[CONF_CONSENT_TIMESTAMP] = datetime.now(tz=UTC).isoformat()
 
                 if self._is_reauth and self._reauth_entry_id:
-                    # Reauth: update the existing entry's token only
                     existing = self.hass.config_entries.async_get_entry(
                         self._reauth_entry_id
                     )
@@ -441,7 +519,7 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # -----------------------------------------------------------------------
-    # Step 7: Auth error (retry or abort)
+    # Step 8: Auth error (retry or abort)
     # -----------------------------------------------------------------------
 
     async def async_step_auth_error(
@@ -450,7 +528,6 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Show the Device Flow error with options to retry or abort."""
         if user_input is not None:
             if user_input.get("retry"):
-                # Reset poll task flag so a new task is created on retry
                 if hasattr(self, "_poll_task_started"):
                     del self._poll_task_started
                 return await self.async_step_device_auth()
@@ -473,9 +550,7 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Entry point for re-authentication triggered by the coordinator."""
         self._is_reauth = True
-        # entry_data is the existing config entry's data dict
         self._data.update(entry_data)
-        # Find the existing entry so we can update it on success
         for entry in self.hass.config_entries.async_entries(DOMAIN):
             if entry.data.get(CONF_GITHUB_LOGIN) == entry_data.get(CONF_GITHUB_LOGIN):
                 self._reauth_entry_id = entry.entry_id
@@ -487,7 +562,6 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Confirm re-authentication and kick off Device Flow."""
         if user_input is not None:
-            # Reset poll task flag so a fresh background task is created
             if hasattr(self, "_poll_task_started"):
                 del self._poll_task_started
             return await self.async_step_device_auth()
@@ -534,7 +608,6 @@ class NemFlexTelemetryOptionsFlow(config_entries.OptionsFlow):
         all_fields = list(DEFAULT_ENTITY_MAPPINGS.keys())
 
         if user_input is not None:
-            # Light validation: all provided values should be non-empty
             for field in all_fields:
                 if not user_input.get(field, ""):
                     errors[field] = "entity_required"

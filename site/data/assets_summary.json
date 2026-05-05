@@ -1,0 +1,5 @@
+{
+  "asset_mix": {"stationary_battery_kwh": 0.0, "ev_kwh": 0.0},
+  "v2g_duty_cycle": {"intervals": [], "unplugged_pct": [], "plugged_idle_pct": [], "charging_pct": [], "discharging_pct": [], "driving_pct": []},
+  "v2g_dispatch_share": {"intervals": [], "battery_kw": [], "ev_kw": []}
+}

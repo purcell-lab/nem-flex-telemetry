@@ -2,16 +2,19 @@
 
 Responsibilities:
 - Read HAEO entity states every 5 minutes
-- Build and validate the 13-field telemetry record (schema v1.1)
+- Build and validate the schema v2.0 telemetry record (18 flat fields + assets[] + deferrable_loads[])
 - Derive flex headroom from battery limits when HAEO does not expose them directly
+- Infer per-EV connection state and power_flow_capability (not from any entity)
+- Track the last_bidirectional_ev_id across intervals (sticky)
+- Re-run global entity sweep on every coordinator startup
 - Buffer records in memory
 - Push the buffer to GitHub on the hour (every 12 records = 1 hour of data)
 - Expose status attributes to sensor.py
 - Trigger HA re-authentication when the stored OAuth token is rejected (401)
-- Discover and log context entities (PD7day forecast, EV SOC) for v0.3
 
+All prices are stored in $/kWh (no /1000 conversion from v2.0 onwards).
 All GitHub I/O is async (aiohttp via NemFlexGitHubClient).
-Version: 0.2.0 / Schema: 1.1
+Version: 0.3.0 / Schema: 2.0
 """
 
 from __future__ import annotations
@@ -28,7 +31,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
-    CONF_ENTITY_BASELINE,
+    ASSET_DEFAULTS,
+    CONF_EV1_CAPACITY_KWH,
+    CONF_EV2_CAPACITY_KWH,
     CONF_ENTITY_ENVELOPE_EXPORT,
     CONF_ENTITY_ENVELOPE_IMPORT,
     CONF_ENTITY_FLEX_DOWN,
@@ -36,68 +41,57 @@ from .const import (
     CONF_ENTITY_NET_IMPORT,
     CONF_ENTITY_PRICE_EXPORT,
     CONF_ENTITY_PRICE_SIGNAL,
-    CONF_ENTITY_SETPOINT,
-    CONF_ENTITY_SOC,
+    CONF_ENTITY_SHADOW_ENVELOPE_EXPORT,
+    CONF_ENTITY_SHADOW_ENVELOPE_IMPORT,
+    CONF_ENTITY_SHADOW_LOAD_FORECAST,
+    CONF_ENTITY_SHADOW_SOLAR_FORECAST,
+    CONF_ENTITY_SOLAR,
+    CONF_ENTITY_TOTAL_LOAD,
     CONF_GITHUB_LOGIN,
+    CONF_HOME_BATTERY_CAPACITY_KWH,
     CONF_HOUSEHOLD_ID,
     CONF_POSTCODE_PREFIX,
     CONF_REGION,
     CONF_TOKEN,
     DEFAULT_BATTERY_MAX_CHARGE_KW,
     DEFAULT_BATTERY_MAX_DISCHARGE_KW,
+    DEFAULT_EV_MAX_CHARGE_KW,
+    DEFAULT_EV_MAX_DISCHARGE_KW,
     DOMAIN,
     ENTITY_BATTERY_MAX_CHARGE,
     ENTITY_BATTERY_MAX_DISCHARGE,
     GITHUB_REPO,
     RECORDS_PER_PUSH,
+    SCHEMA_VERSION,
     UPDATE_INTERVAL_SECONDS,
     VERSION,
 )
-from .discovery import discover_context_entities
+from .discovery import discover_context_entities, run_global_sweep
 from .github_client import GitHubPushError, NemFlexGitHubClient, TokenInvalidError
 
 _LOGGER = logging.getLogger(__name__)
 
-# Price unit conversion: entities report $/kWh, schema stores $/MWh
-_KWH_TO_MWH_MULTIPLIER = 1000.0
-
-# Voluptuous schema for a single telemetry record (schema v1.1)
-_NEM_REGIONS = vol.In(["NSW1", "QLD1", "VIC1", "SA1", "TAS1"])
-
-RECORD_SCHEMA = vol.Schema(
-    {
-        vol.Required("interval_start_utc"): str,
-        vol.Required("region"): _NEM_REGIONS,
-        vol.Required("postcode_prefix"): vol.Match(r"^[0-9]{3}$"),
-        vol.Required("net_import_kw"): vol.Coerce(float),
-        vol.Required("price_signal_seen"): vol.Coerce(float),
-        vol.Required("price_export_seen"): vol.Coerce(float),
-        vol.Required("optimiser_setpoint_kw"): vol.Coerce(float),
-        vol.Required("flex_available_up_kw"): vol.All(vol.Coerce(float), vol.Range(min=0)),
-        vol.Required("flex_available_down_kw"): vol.All(vol.Coerce(float), vol.Range(min=0)),
-        vol.Required("storage_soc_pct"): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
-        vol.Required("envelope_import_limit_kw"): vol.All(vol.Coerce(float), vol.Range(min=0)),
-        vol.Required("envelope_export_limit_kw"): vol.All(vol.Coerce(float), vol.Range(min=0)),
-        vol.Required("naive_baseline_kw"): vol.Coerce(float),
-    }
-)
+# EV connection state inference constants
+_SOC_DELTA_PLUGGED_IDLE_MAX = 0.5     # % per interval; below this = plugged_idle
+_SOC_DELTA_CHARGE_MIN = 1.0           # % per 5min; rising at this rate = charging
+_SOC_DELTA_DISCHARGE_MIN = 1.0        # % per 5min; falling at this rate = discharging
+_SOC_DELTA_DRIVING_MIN = 1.5          # % per 5min; rapid drop with no shadow = driving
+_BIDIRECTIONAL_STICKY_HOURS = 1       # hours; once seen discharging, stays bidirectional for this long
 
 
 def _read_state_float(
-    hass: HomeAssistant, entity_id: str | None, fallback: float = 0.0
-) -> float:
+    hass: HomeAssistant, entity_id: str | None, fallback: float | None = 0.0
+) -> float | None:
     """Read a HA entity state as a float.
 
-    Returns the fallback if entity_id is None, entity is absent, or state
+    Returns fallback if entity_id is None, entity is absent, or state
     is unavailable/unknown/unparseable.
     """
     if not entity_id:
         return fallback
     state = hass.states.get(entity_id)
     if state is None or state.state in ("unavailable", "unknown", ""):
-        _LOGGER.debug(
-            "Entity %s is unavailable, using fallback %s", entity_id, fallback
-        )
+        _LOGGER.debug("Entity %s is unavailable, using fallback %s", entity_id, fallback)
         return fallback
     try:
         return float(state.state)
@@ -110,6 +104,19 @@ def _read_state_float(
         return fallback
 
 
+def _read_state_float_or_none(hass: HomeAssistant, entity_id: str | None) -> float | None:
+    """Read a HA entity state as a float, returning None if unavailable."""
+    if not entity_id:
+        return None
+    state = hass.states.get(entity_id)
+    if state is None or state.state in ("unavailable", "unknown", ""):
+        return None
+    try:
+        return float(state.state)
+    except ValueError:
+        return None
+
+
 class CoordinatorData:
     """Data class holding coordinator output for sensor consumption."""
 
@@ -120,6 +127,7 @@ class CoordinatorData:
         self.push_errors: int = 0
         self.cohort_size: int = 0
         self.buffer_size: int = 0
+        self.unmapped_entities: list[str] = []
 
 
 class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
@@ -151,12 +159,37 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._records_pushed_today: int = 0
         self._last_push_day: int | None = None
 
-        # Track whether flex headroom is derived (for one-time startup log)
+        # Flex derivation logging gate
         self._flex_derived_logged: bool = False
 
-        # Context entities discovered at first update (v0.3 forecast horizon)
+        # Context entities discovered at first update
         self._context_entities: dict[str, str | None] = {}
         self._context_discovered: bool = False
+
+        # Global sweep: re-run on every coordinator startup
+        self._last_sweep_unmapped: list[str] = []
+
+        # Per-EV SOC history for connection state inference
+        # {asset_id: (prev_soc, prev_timestamp)}
+        self._ev_prev_soc: dict[str, tuple[float, datetime]] = {}
+
+        # Bidirectional charger sticky tracking
+        # {asset_id: last_discharge_utc}
+        self._last_discharge_time: dict[str, datetime] = {}
+
+        # Which EV was last confirmed on the bidirectional charger
+        self._last_bidirectional_ev_id: str | None = None
+
+        # Asset capacity overrides from config (set in async_step_assets)
+        self._asset_capacity: dict[str, float] = {}
+        if CONF_HOME_BATTERY_CAPACITY_KWH in self._config:
+            self._asset_capacity["home_battery"] = float(
+                self._config[CONF_HOME_BATTERY_CAPACITY_KWH]
+            )
+        if CONF_EV1_CAPACITY_KWH in self._config:
+            self._asset_capacity["ev1"] = float(self._config[CONF_EV1_CAPACITY_KWH])
+        if CONF_EV2_CAPACITY_KWH in self._config:
+            self._asset_capacity["ev2"] = float(self._config[CONF_EV2_CAPACITY_KWH])
 
     def _get_or_create_github_client(self) -> NemFlexGitHubClient:
         """Return the GitHub client, creating it if needed."""
@@ -166,12 +199,6 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 repo_name=GITHUB_REPO,
             )
         return self._github_client
-
-    def _read_battery_active_power(self) -> float:
-        """Read the battery active power (setpoint entity). Positive = charging."""
-        return _read_state_float(
-            self.hass, self._config.get(CONF_ENTITY_SETPOINT), fallback=0.0
-        )
 
     def _read_battery_max_charge(self) -> float:
         """Read battery max charge rate, falling back to the configured default."""
@@ -193,112 +220,339 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 pass
         return DEFAULT_BATTERY_MAX_DISCHARGE_KW
 
-    def _derive_flex_headroom(
-        self,
-    ) -> tuple[float, float]:
+    def _derive_flex_headroom(self, battery_setpoint_kw: float) -> tuple[float, float]:
         """Derive flex_available_up/down from battery limits.
 
-        Formula:
-            flex_up  = max_charge  - max(0, battery_active_power)
-                       # extra room to absorb: full charge capacity minus current charge rate
-            flex_down = max_discharge - max(0, -battery_active_power)
-                       # extra room to discharge: full discharge capacity minus current discharge rate
+        flex_up  = max_charge  - max(0, battery_active_power)
+        flex_down = max_discharge - max(0, -battery_active_power)
 
-        Both are clamped to >= 0.
-
-        Returns: (flex_up_kw, flex_down_kw)
+        Returns (flex_up_kw, flex_down_kw), both >= 0.
         """
         if not self._flex_derived_logged:
             _LOGGER.info(
                 "flex_available_up/down derived from battery limits since HAEO does not "
-                "expose them directly. Add sensor.haeo_flex_up / sensor.haeo_flex_down "
-                "to your instance for higher fidelity."
+                "expose them directly."
             )
             self._flex_derived_logged = True
 
-        bap = self._read_battery_active_power()
         max_charge = self._read_battery_max_charge()
         max_discharge = self._read_battery_max_discharge()
 
-        # Positive bap = charging; negative = discharging
-        current_charge_rate = max(0.0, bap)
-        current_discharge_rate = max(0.0, -bap)
+        current_charge_rate = max(0.0, battery_setpoint_kw)
+        current_discharge_rate = max(0.0, -battery_setpoint_kw)
 
         flex_up = max(0.0, max_charge - current_charge_rate)
         flex_down = max(0.0, max_discharge - current_discharge_rate)
         return flex_up, flex_down
 
-    def _build_record(self) -> dict[str, Any]:
-        """Read all HAEO entity states and build a 13-field telemetry record.
+    def _infer_ev_connection_state(
+        self,
+        asset_id: str,
+        shadow: float | None,
+        setpoint_kw: float | None,
+        current_soc: float,
+        now: datetime,
+    ) -> tuple[str, str]:
+        """Infer EV connection_state and power_flow_capability for one interval.
 
+        Connection state inference rules (see spec section 6):
+        - shadow is None/unavailable -> 'unplugged'
+        - shadow present AND setpoint is None or ~0 AND SOC delta < 0.5% -> 'plugged_idle'
+        - setpoint > 0 OR SOC rising > 1%/5min -> 'charging'
+        - setpoint < 0 OR SOC falling > 1%/5min (while not driving) -> 'discharging'
+        - shadow unavailable AND SOC dropping > 1.5%/5min -> 'driving'
+
+        Power flow capability:
+        - 'unplugged' -> 'none'
+        - 'discharging' -> 'bidirectional' (marks this EV as last bidirectional user)
+        - plugged AND no recent discharge -> 'charge_only'
+        - plugged AND recent discharge (within sticky window) from THIS ev -> 'bidirectional'
+        - plugged AND recent discharge from ANOTHER ev -> 'charge_only' (other EV has the bidirectional charger)
+
+        Returns (connection_state, power_flow_capability).
+        """
+        now_utc = now
+
+        # Retrieve previous SOC for delta calculation
+        soc_delta_pct: float | None = None
+        if asset_id in self._ev_prev_soc:
+            prev_soc, prev_ts = self._ev_prev_soc[asset_id]
+            elapsed_minutes = (now_utc - prev_ts).total_seconds() / 60.0
+            if elapsed_minutes > 0:
+                soc_delta_pct = current_soc - prev_soc  # positive = rising
+
+        # Rule 1: shadow absent -> check for driving vs unplugged
+        if shadow is None:
+            if soc_delta_pct is not None and soc_delta_pct < -_SOC_DELTA_DRIVING_MIN:
+                # SOC dropping rapidly without a shadow price: likely driving
+                return "driving", "none"
+            return "unplugged", "none"
+
+        # Shadow is present: EV is plugged
+        # Rule 2: charging (setpoint > 0 or SOC rising fast)
+        if setpoint_kw is not None and setpoint_kw > 0.1:
+            return "charging", self._get_power_flow_capability(asset_id, "charging")
+
+        if soc_delta_pct is not None and soc_delta_pct > _SOC_DELTA_CHARGE_MIN:
+            return "charging", self._get_power_flow_capability(asset_id, "charging")
+
+        # Rule 3: discharging (setpoint < 0 or SOC falling fast)
+        if setpoint_kw is not None and setpoint_kw < -0.1:
+            self._record_discharge(asset_id, now_utc)
+            return "discharging", "bidirectional"
+
+        if soc_delta_pct is not None and soc_delta_pct < -_SOC_DELTA_DISCHARGE_MIN:
+            self._record_discharge(asset_id, now_utc)
+            return "discharging", "bidirectional"
+
+        # Rule 4: plugged idle
+        return "plugged_idle", self._get_power_flow_capability(asset_id, "plugged_idle")
+
+    def _record_discharge(self, asset_id: str, now: datetime) -> None:
+        """Record that this EV was observed discharging (bidirectional charger)."""
+        self._last_discharge_time[asset_id] = now
+        self._last_bidirectional_ev_id = asset_id
+
+    def _get_power_flow_capability(self, asset_id: str, connection_state: str) -> str:
+        """Determine power_flow_capability based on sticky bidirectional tracking."""
+        if connection_state == "charging":
+            # If this EV was recently discharging, it has the bidirectional charger
+            last_discharge = self._last_discharge_time.get(asset_id)
+            if last_discharge is not None:
+                hours_since = (datetime.now(UTC) - last_discharge).total_seconds() / 3600
+                if hours_since <= _BIDIRECTIONAL_STICKY_HOURS:
+                    return "bidirectional"
+            # Conservative default until first discharge observed
+            return "charge_only"
+
+        if connection_state == "plugged_idle":
+            # Same logic as charging
+            last_discharge = self._last_discharge_time.get(asset_id)
+            if last_discharge is not None:
+                hours_since = (datetime.now(UTC) - last_discharge).total_seconds() / 3600
+                if hours_since <= _BIDIRECTIONAL_STICKY_HOURS:
+                    return "bidirectional"
+            return "charge_only"
+
+        return "charge_only"
+
+    def _build_asset_record(
+        self,
+        asset_id: str,
+        asset_spec: dict,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Build a single asset record for one interval.
+
+        Reads entity states, infers EV connection state, and updates SOC history.
+        """
+        kind: str = asset_spec["kind"]
+        bidirectional_capable: bool = asset_spec["bidirectional_capable"]
+        soc_entity: str | None = asset_spec.get("soc_entity")
+        setpoint_entity: str | None = asset_spec.get("setpoint_entity")
+        shadow_entity: str | None = asset_spec.get("shadow_entity")
+
+        # Capacity: config override takes precedence over spec default
+        capacity_kwh: float = self._asset_capacity.get(
+            asset_id, asset_spec.get("capacity_kwh", 0.0)
+        )
+
+        # Read entities
+        soc_pct = _read_state_float(self.hass, soc_entity, fallback=0.0) or 0.0
+        setpoint_kw = _read_state_float_or_none(self.hass, setpoint_entity)
+        shadow = _read_state_float_or_none(self.hass, shadow_entity)
+
+        # Derive per-asset flex headroom
+        if kind == "stationary_battery":
+            max_charge = self._read_battery_max_charge()
+            max_discharge = self._read_battery_max_discharge()
+        else:
+            max_charge = asset_spec.get("max_charge_kw", DEFAULT_EV_MAX_CHARGE_KW)
+            max_discharge = asset_spec.get("max_discharge_kw", DEFAULT_EV_MAX_DISCHARGE_KW)
+
+        sp = setpoint_kw if setpoint_kw is not None else 0.0
+        available_up = max(0.0, max_charge - max(0.0, sp))
+        available_down = max(0.0, max_discharge - max(0.0, -sp))
+
+        record: dict[str, Any] = {
+            "asset_id": asset_id,
+            "kind": kind,
+            "bidirectional_capable": bidirectional_capable,
+            "capacity_kwh": capacity_kwh,
+            "soc_pct": soc_pct,
+            "setpoint_kw": setpoint_kw,
+            "available_up_kw": round(available_up, 3),
+            "available_down_kw": round(available_down, 3),
+            "shadow_power_balance_price": shadow,
+        }
+
+        # EV-specific fields
+        if kind == "ev":
+            connection_state, power_flow_capability = self._infer_ev_connection_state(
+                asset_id, shadow, setpoint_kw, soc_pct, now
+            )
+            record["connection_state"] = connection_state
+            record["power_flow_capability"] = power_flow_capability
+            record["departure_target_pct"] = None
+            record["departure_time_utc"] = None
+
+        # Update SOC history for next interval's delta calculation
+        if kind == "ev":
+            self._ev_prev_soc[asset_id] = (soc_pct, now)
+
+        return record
+
+    def _build_record(self) -> dict[str, Any]:
+        """Read all HAEO entity states and build a schema v2.0 telemetry record.
+
+        Prices are stored in $/kWh (no /1000 conversion).
         Runs in the main HA event loop (state reads are non-blocking).
-        Price values stored in $/kWh by HAEO entities are converted to $/MWh.
-        Flex headroom is derived from battery limits if not exposed by HAEO.
         """
         now_utc = datetime.now(tz=UTC)
         minutes = (now_utc.minute // 5) * 5
         interval_start = now_utc.replace(minute=minutes, second=0, microsecond=0)
 
-        # Flex headroom: use entity if available, otherwise derive
+        # Core measurements
+        net_import_kw: float = _read_state_float(
+            self.hass, self._config.get(CONF_ENTITY_NET_IMPORT), fallback=0.0
+        ) or 0.0
+
+        solar_kw: float = max(
+            0.0,
+            _read_state_float(
+                self.hass, self._config.get(CONF_ENTITY_SOLAR), fallback=0.0
+            ) or 0.0,
+        )
+
+        total_load_kw: float = _read_state_float(
+            self.hass, self._config.get(CONF_ENTITY_TOTAL_LOAD), fallback=0.0
+        ) or 0.0
+
+        # house_load_kw = total_load - sum(deferrable current_kw), clamped to 0
+        # deferrable_loads is empty in v0.3, so house_load_kw = total_load (clamped)
+        deferrable_load_kw: float = 0.0
+        house_load_kw: float = max(0.0, total_load_kw - deferrable_load_kw)
+
+        # Prices in $/kWh (no conversion)
+        price_signal_seen: float = _read_state_float(
+            self.hass, self._config.get(CONF_ENTITY_PRICE_SIGNAL), fallback=0.0
+        ) or 0.0
+        price_export_seen: float = _read_state_float(
+            self.hass, self._config.get(CONF_ENTITY_PRICE_EXPORT), fallback=0.0
+        ) or 0.0
+
+        # Envelope limits
+        envelope_import_limit_kw: float = _read_state_float(
+            self.hass, self._config.get(CONF_ENTITY_ENVELOPE_IMPORT), fallback=5.0
+        ) or 5.0
+        envelope_export_limit_kw: float = abs(
+            _read_state_float(
+                self.hass, self._config.get(CONF_ENTITY_ENVELOPE_EXPORT), fallback=5.0
+            ) or 5.0
+        )
+
+        # Flex headroom
         flex_up_entity = self._config.get(CONF_ENTITY_FLEX_UP)
         flex_down_entity = self._config.get(CONF_ENTITY_FLEX_DOWN)
 
+        # Use home_battery setpoint to derive headroom if HAEO doesn't expose flex directly
+        battery_setpoint = 0.0
+        home_battery_spec = ASSET_DEFAULTS.get("home_battery", {})
+        batt_setpoint_entity = home_battery_spec.get("setpoint_entity")
+        if batt_setpoint_entity:
+            battery_setpoint = _read_state_float(
+                self.hass, batt_setpoint_entity, fallback=0.0
+            ) or 0.0
+
         if flex_up_entity and self.hass.states.get(flex_up_entity) is not None:
-            flex_up = _read_state_float(self.hass, flex_up_entity, fallback=0.0)
+            flex_up = max(0.0, _read_state_float(self.hass, flex_up_entity, fallback=0.0) or 0.0)
         else:
-            flex_up, _ = self._derive_flex_headroom()
+            flex_up, _ = self._derive_flex_headroom(battery_setpoint)
 
         if flex_down_entity and self.hass.states.get(flex_down_entity) is not None:
-            flex_down = _read_state_float(self.hass, flex_down_entity, fallback=0.0)
+            flex_down = max(0.0, _read_state_float(self.hass, flex_down_entity, fallback=0.0) or 0.0)
         else:
-            _, flex_down = self._derive_flex_headroom()
+            _, flex_down = self._derive_flex_headroom(battery_setpoint)
 
-        # Price conversion: $/kWh -> $/MWh
-        price_buy_kwh = _read_state_float(
-            self.hass, self._config.get(CONF_ENTITY_PRICE_SIGNAL), fallback=0.0
+        # Shadow prices (all nullable)
+        shadow_load_forecast = _read_state_float_or_none(
+            self.hass, self._config.get(CONF_ENTITY_SHADOW_LOAD_FORECAST)
         )
-        price_export_kwh = _read_state_float(
-            self.hass, self._config.get(CONF_ENTITY_PRICE_EXPORT), fallback=0.0
+        shadow_solar_forecast = _read_state_float_or_none(
+            self.hass, self._config.get(CONF_ENTITY_SHADOW_SOLAR_FORECAST)
         )
+        shadow_envelope_import = _read_state_float_or_none(
+            self.hass, self._config.get(CONF_ENTITY_SHADOW_ENVELOPE_IMPORT)
+        )
+        shadow_envelope_export = _read_state_float_or_none(
+            self.hass, self._config.get(CONF_ENTITY_SHADOW_ENVELOPE_EXPORT)
+        )
+
+        # Aggregate shadow energy price: mean of non-None shadow prices as cross-check
+        shadow_values = [
+            v for v in [shadow_load_forecast, shadow_solar_forecast,
+                        shadow_envelope_import, shadow_envelope_export]
+            if v is not None
+        ]
+        shadow_energy_price: float | None = (
+            round(sum(shadow_values) / len(shadow_values), 6) if shadow_values else None
+        )
+
+        # Naive baseline: use total_load_kw (subtraction method)
+        # If HAEO exposes a counterfactual sensor, it would go here in a future version
+        naive_baseline_kw = total_load_kw
+        naive_baseline_method = "subtraction"
+
+        # Build asset records
+        assets: list[dict[str, Any]] = []
+        for asset_id, asset_spec in ASSET_DEFAULTS.items():
+            try:
+                asset_record = self._build_asset_record(asset_id, asset_spec, now_utc)
+                assets.append(asset_record)
+            except Exception as exc:  # pylint: disable=broad-except
+                _LOGGER.warning(
+                    "Failed to build asset record for %s: %s", asset_id, exc
+                )
 
         record: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
             "interval_start_utc": interval_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "region": self.region,
             "postcode_prefix": self._postcode_prefix,
-            "net_import_kw": _read_state_float(
-                self.hass, self._config.get(CONF_ENTITY_NET_IMPORT), fallback=0.0
-            ),
-            "price_signal_seen": round(price_buy_kwh * _KWH_TO_MWH_MULTIPLIER, 4),
-            "price_export_seen": round(price_export_kwh * _KWH_TO_MWH_MULTIPLIER, 4),
-            "optimiser_setpoint_kw": _read_state_float(
-                self.hass, self._config.get(CONF_ENTITY_SETPOINT), fallback=0.0
-            ),
-            "flex_available_up_kw": max(0.0, flex_up),
-            "flex_available_down_kw": max(0.0, flex_down),
-            "storage_soc_pct": _read_state_float(
-                self.hass, self._config.get(CONF_ENTITY_SOC), fallback=0.0
-            ),
-            "envelope_import_limit_kw": _read_state_float(
-                self.hass,
-                self._config.get(CONF_ENTITY_ENVELOPE_IMPORT),
-                fallback=5.0,
-            ),
-            "envelope_export_limit_kw": abs(
-                _read_state_float(
-                    self.hass,
-                    self._config.get(CONF_ENTITY_ENVELOPE_EXPORT),
-                    fallback=5.0,
-                )
-            ),
-            "naive_baseline_kw": _read_state_float(
-                self.hass, self._config.get(CONF_ENTITY_BASELINE), fallback=0.0
-            ),
+            "net_import_kw": round(net_import_kw, 3),
+            "solar_kw": round(solar_kw, 3),
+            "house_load_kw": round(house_load_kw, 3),
+            "deferrable_load_kw": round(deferrable_load_kw, 3),
+            "naive_baseline_kw": round(naive_baseline_kw, 3),
+            "naive_baseline_method": naive_baseline_method,
+            "price_signal_seen": round(price_signal_seen, 6),
+            "price_export_seen": round(price_export_seen, 6),
+            "envelope_import_limit_kw": round(envelope_import_limit_kw, 3),
+            "envelope_export_limit_kw": round(envelope_export_limit_kw, 3),
+            "flex_available_up_kw": round(flex_up, 3),
+            "flex_available_down_kw": round(flex_down, 3),
+            "shadow_energy_price": shadow_energy_price,
+            "shadow_load_forecast_price": shadow_load_forecast,
+            "shadow_solar_forecast_price": shadow_solar_forecast,
+            "shadow_envelope_import_price": shadow_envelope_import,
+            "shadow_envelope_export_price": shadow_envelope_export,
+            "assets": assets,
+            "deferrable_loads": [],
         }
         return record
 
-    def _validate_record(self, record: dict[str, Any]) -> dict[str, Any]:
-        """Run voluptuous validation. Raises vol.Invalid on failure."""
-        return RECORD_SCHEMA(record)
+    async def _async_run_global_sweep(self) -> None:
+        """Run the global entity sweep and log unmapped entities."""
+        unmapped = run_global_sweep(self.hass)
+        self._last_sweep_unmapped = unmapped
+        self._data.unmapped_entities = unmapped
+        if unmapped:
+            _LOGGER.info(
+                "Global sweep found %d unmapped entit%s on startup: %s",
+                len(unmapped),
+                "y" if len(unmapped) == 1 else "ies",
+                ", ".join(unmapped),
+            )
 
     async def _async_discover_context(self) -> None:
         """Discover context entities at first update and log them."""
@@ -307,7 +561,7 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         )
         self._context_discovered = True
         _LOGGER.info(
-            "Context entities for v0.3 forecast horizon: %s",
+            "Context entities: %s",
             {k: v for k, v in self._context_entities.items() if v is not None},
         )
 
@@ -320,10 +574,11 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # One-time context entity discovery
         if not self._context_discovered:
             await self._async_discover_context()
+            await self._async_run_global_sweep()
 
         record = self._build_record()
 
-        # Validate (voluptuous is synchronous; run in executor)
+        # Validate using voluptuous (synchronous; run in executor)
         try:
             validated = await self.hass.async_add_executor_job(
                 self._validate_record, record
@@ -342,7 +597,7 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
             len(self._buffer),
         )
 
-        # Push when buffer reaches RECORDS_PER_PUSH (1 hour of data)
+        # Push when buffer reaches RECORDS_PER_PUSH
         if len(self._buffer) >= RECORDS_PER_PUSH:
             await self._async_push_buffer()
 
@@ -371,6 +626,49 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         return self._data
 
+    def _validate_record(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Run lightweight voluptuous validation on the top-level record.
+
+        Full JSON Schema validation (additionalProperties etc.) is run by the
+        CI workflow via jsonschema. Here we just confirm critical fields are
+        present and prices are in plausible $/kWh range.
+        """
+        _NEM_REGIONS = vol.In(["NSW1", "QLD1", "VIC1", "SA1", "TAS1"])
+        _PRICE_RANGE = vol.All(vol.Coerce(float), vol.Range(min=-2.0, max=20.0))
+        _KW_NON_NEG = vol.All(vol.Coerce(float), vol.Range(min=0))
+
+        schema = vol.Schema(
+            {
+                vol.Required("schema_version"): "2.0",
+                vol.Required("interval_start_utc"): str,
+                vol.Required("region"): _NEM_REGIONS,
+                vol.Required("postcode_prefix"): vol.Match(r"^[0-9]{3}$"),
+                vol.Required("net_import_kw"): vol.Coerce(float),
+                vol.Required("solar_kw"): _KW_NON_NEG,
+                vol.Required("house_load_kw"): _KW_NON_NEG,
+                vol.Required("deferrable_load_kw"): _KW_NON_NEG,
+                vol.Required("naive_baseline_kw"): vol.Coerce(float),
+                vol.Required("naive_baseline_method"): vol.In(
+                    ["subtraction", "haeo_counterfactual"]
+                ),
+                vol.Required("price_signal_seen"): _PRICE_RANGE,
+                vol.Required("price_export_seen"): _PRICE_RANGE,
+                vol.Required("envelope_import_limit_kw"): _KW_NON_NEG,
+                vol.Required("envelope_export_limit_kw"): _KW_NON_NEG,
+                vol.Required("flex_available_up_kw"): _KW_NON_NEG,
+                vol.Required("flex_available_down_kw"): _KW_NON_NEG,
+                vol.Optional("shadow_energy_price"): vol.Any(None, _PRICE_RANGE),
+                vol.Optional("shadow_load_forecast_price"): vol.Any(None, _PRICE_RANGE),
+                vol.Optional("shadow_solar_forecast_price"): vol.Any(None, _PRICE_RANGE),
+                vol.Optional("shadow_envelope_import_price"): vol.Any(None, _PRICE_RANGE),
+                vol.Optional("shadow_envelope_export_price"): vol.Any(None, _PRICE_RANGE),
+                vol.Required("assets"): list,
+                vol.Required("deferrable_loads"): list,
+            },
+            extra=vol.ALLOW_EXTRA,
+        )
+        return schema(record)
+
     async def _async_push_buffer(self) -> None:
         """Flush the in-memory buffer to GitHub."""
         if not self._buffer:
@@ -387,9 +685,10 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._records_pushed_today += count
             self._data.last_push_time = datetime.now(tz=UTC)
             _LOGGER.info(
-                "Pushed %d records for household %s (schema v1.1, v%s)",
+                "Pushed %d records for household %s (schema v%s, v%s)",
                 count,
                 self.household_id,
+                SCHEMA_VERSION,
                 VERSION,
             )
 
