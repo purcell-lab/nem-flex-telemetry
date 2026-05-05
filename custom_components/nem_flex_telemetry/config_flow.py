@@ -195,14 +195,35 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_show_code(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Show the user code and poll for the access token in the background."""
-        if not hasattr(self, "_poll_task_started"):
-            self._poll_task_started = True
-            self.hass.async_create_task(self._poll_for_token())
+        """Show the user code and poll for the access token in the background.
 
+        Uses the modern ``progress_task`` pattern so Home Assistant wakes the
+        flow up the moment the polling task completes, rather than relying on
+        the deprecated ``async_show_progress_done`` call from inside the task.
+        """
+        # Start the polling task on first entry into this step.
+        if not hasattr(self, "_poll_task") or self._poll_task is None:
+            self._poll_task = self.hass.async_create_task(self._poll_for_token())
+
+        # If the task has finished, advance to the appropriate next step.
+        if self._poll_task.done():
+            # Surface any unexpected exception so it ends up in the HA log
+            # rather than vanishing silently.
+            exc = self._poll_task.exception()
+            if exc is not None:
+                _LOGGER.error("Device flow polling task failed: %s", exc)
+                self._auth_error = "network"
+                return self.async_show_progress_done(next_step_id="auth_error")
+
+            next_step = getattr(self, "_poll_next_step", "auth_error")
+            return self.async_show_progress_done(next_step_id=next_step)
+
+        # Still polling: show the progress dialog. ``progress_task`` makes HA
+        # re-invoke this step automatically when the task completes.
         return self.async_show_progress(
             step_id="show_code",
             progress_action="waiting_for_user",
+            progress_task=self._poll_task,
             description_placeholders={
                 "user_code": self._device_flow.get("user_code", ""),
                 "verification_uri": "https://github.com/login/device",
@@ -213,7 +234,14 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def _poll_for_token(self) -> None:
-        """Background task: poll GitHub for the access token."""
+        """Background task: poll GitHub for the access token.
+
+        Stores the next step id on ``self._poll_next_step`` so
+        ``async_step_show_code`` can route to it once the task completes.
+        Does not call ``async_show_progress_done`` from inside the task,
+        which is the cause of the dialog hanging on success in newer
+        Home Assistant versions.
+        """
         session = DeviceFlowSession()
         df = self._device_flow
         try:
@@ -225,19 +253,19 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             user_info = await fetch_authenticated_user(token)
             self._data[CONF_TOKEN] = token
             self._data[CONF_GITHUB_LOGIN] = user_info.get("login", "")
-            self.async_show_progress_done(next_step_id="identity")
+            self._poll_next_step = "identity"
         except DeviceFlowExpired:
             self._auth_error = "device_flow_expired"
-            self.async_show_progress_done(next_step_id="auth_error")
+            self._poll_next_step = "auth_error"
         except DeviceFlowDenied:
             self._auth_error = "device_flow_denied"
-            self.async_show_progress_done(next_step_id="auth_error")
+            self._poll_next_step = "auth_error"
         except DeviceFlowInvalid:
             self._auth_error = "device_flow_invalid"
-            self.async_show_progress_done(next_step_id="auth_error")
+            self._poll_next_step = "auth_error"
         except DeviceFlowNetworkError as exc:
             self._auth_error = str(exc)
-            self.async_show_progress_done(next_step_id="auth_error")
+            self._poll_next_step = "auth_error"
 
     # -----------------------------------------------------------------------
     # Step 4: Household identity
