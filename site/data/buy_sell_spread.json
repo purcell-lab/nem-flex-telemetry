@@ -1,0 +1,34 @@
+{
+  "regions": {
+    "NSW1": {
+      "intervals": [],
+      "buy_price": [],
+      "sell_price": [],
+      "negative_fit_intervals": []
+    },
+    "QLD1": {
+      "intervals": [],
+      "buy_price": [],
+      "sell_price": [],
+      "negative_fit_intervals": []
+    },
+    "VIC1": {
+      "intervals": [],
+      "buy_price": [],
+      "sell_price": [],
+      "negative_fit_intervals": []
+    },
+    "SA1": {
+      "intervals": [],
+      "buy_price": [],
+      "sell_price": [],
+      "negative_fit_intervals": []
+    },
+    "TAS1": {
+      "intervals": [],
+      "buy_price": [],
+      "sell_price": [],
+      "negative_fit_intervals": []
+    }
+  }
+}
