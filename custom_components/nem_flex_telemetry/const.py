@@ -7,7 +7,7 @@ import re
 DOMAIN = "nem_flex_telemetry"
 PLATFORMS: list[str] = ["sensor"]
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 # ---------------------------------------------------------------------------
 # OAuth Device Flow constants
