@@ -43,6 +43,7 @@ from .const import (
     CONF_ENTITY_NET_IMPORT,
     CONF_ENTITY_PRICE_SIGNAL,
     CONF_ENTITY_PRICE_EXPORT,
+    CONF_ENTITY_SHADOW_ENERGY,
     CONF_ENTITY_SHADOW_ENVELOPE_EXPORT,
     CONF_ENTITY_SHADOW_ENVELOPE_IMPORT,
     CONF_ENTITY_SHADOW_LOAD_FORECAST,
@@ -157,7 +158,7 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     asset configuration, and consent.
     """
 
-    VERSION = 2
+    VERSION = 3
 
     def __init__(self) -> None:
         """Initialise the config flow."""
