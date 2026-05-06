@@ -302,26 +302,45 @@ def write_parquet_by_date(df: pd.DataFrame, resolution: str) -> None:
 # ---------------------------------------------------------------------------
 
 def compute_flex_stack(df: pd.DataFrame) -> dict[str, Any]:
-    """Tab 1: Cohort flex stack over time ($/kWh price overlay)."""
-    if df.empty:
-        return {"intervals": [], "flex_up_kw": [], "flex_down_kw": [], "price_signal": []}
+    """Tab 1: Cohort flex stack over time ($/kWh price overlay).
 
+    Cohort flex at time T = sum across households of flex_available_(up|down)_kw
+    at that 5-minute interval. Hourly = time-mean of those 5-minute cohort sums
+    (NOT a sum across the 12 sub-intervals, which would 12x-inflate the kW).
+
+    Price signal at time T = cohort mean of price_signal_seen, then time-mean
+    over the hour.
+    """
+    if df.empty:
+        return {
+            "intervals": [], "flex_up_kw": [], "flex_down_kw": [],
+            "price_signal": [], "price_unit": "$/kWh",
+        }
+
+    # Step 1: cohort sum at each 5-minute interval
+    cohort_5min = (
+        df.groupby("interval_start_utc")
+        .agg(
+            flex_up_kw=("flex_available_up_kw", "sum"),
+            flex_down_kw=("flex_available_down_kw", "sum"),
+            price_signal=("price_signal_seen", "mean"),
+        )
+        .reset_index()
+    )
+
+    # Step 2: time-mean over the hour (kW averaged, not summed)
     hourly = (
-        df.set_index("interval_start_utc")
-        .resample("h")[["flex_available_up_kw", "flex_available_down_kw", "price_signal_seen"]]
-        .agg({
-            "flex_available_up_kw": "sum",
-            "flex_available_down_kw": "sum",
-            "price_signal_seen": "mean",
-        })
+        cohort_5min.set_index("interval_start_utc")
+        .resample("h")
+        .mean(numeric_only=True)
         .reset_index()
     )
 
     return {
         "intervals": hourly["interval_start_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ").tolist(),
-        "flex_up_kw": hourly["flex_available_up_kw"].round(2).tolist(),
-        "flex_down_kw": hourly["flex_available_down_kw"].round(2).tolist(),
-        "price_signal": hourly["price_signal_seen"].round(6).tolist(),
+        "flex_up_kw": hourly["flex_up_kw"].round(2).tolist(),
+        "flex_down_kw": hourly["flex_down_kw"].round(2).tolist(),
+        "price_signal": hourly["price_signal"].round(6).tolist(),
         "price_unit": "$/kWh",
     }
 
