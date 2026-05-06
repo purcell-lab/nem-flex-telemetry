@@ -61,14 +61,14 @@
 
 <body class="min-h-screen font-sans">
 
-  <!-- Demo data banner (shown only when no real cohort data yet) -->
+  <!-- Fallback banner (shown only when one or more feeds fall back to sample) -->
   <div id="demo-banner" class="hidden bg-gold/90 text-ink px-6 py-3 border-b border-ink/20">
     <div class="max-w-6xl mx-auto flex items-center justify-between gap-4 text-sm flex-wrap">
       <div>
-        <span class="font-semibold">Demonstration data shown.</span>
-        No households have published telemetry yet. Charts use a synthetic 24-hour sample so you can see the dashboard's intent. Real data appears automatically once the first install starts pushing.
+        <span class="font-semibold">Sample data fallback active.</span>
+        One or more feeds could not be parsed and a synthetic 24-hour sample is used in their place. Real data resumes on the next aggregator run.
       </div>
-      <a href="https://github.com/purcell-lab/nem-flex-telemetry/blob/main/docs/INSTALL.md" class="font-semibold underline whitespace-nowrap">Become household 001</a>
+      <a href="https://github.com/purcell-lab/nem-flex-telemetry/blob/main/docs/INSTALL.md" class="font-semibold underline whitespace-nowrap">Join the cohort</a>
     </div>
   </div>
 
@@ -362,11 +362,19 @@ async function loadData() {
     sample = await sr.json();
   } catch { /* no sample */ }
 
+  // Defensive parser: tolerate aggregator emitting bare `NaN` or `Infinity`
+  // tokens (Python's json default), which JSON.parse rejects. Strip them to
+  // null before parsing so the dashboard does not silently fall back to sample.
+  function safeJSONParse(text) {
+    return JSON.parse(text.replace(/\bNaN\b|\b-?Infinity\b/g, 'null'));
+  }
+
   async function tryLoad(url, fallbackKey) {
     try {
       const r = await fetch(url);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const payload = await r.json();
+      const text = await r.text();
+      const payload = safeJSONParse(text);
       if (isEmptyPayload(payload)) {
         usingSample = true;
         return sample[fallbackKey] || payload;

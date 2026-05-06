@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sys
 from datetime import UTC, datetime
@@ -725,6 +726,37 @@ def compute_status(df: pd.DataFrame) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# JSON sanitiser
+# ---------------------------------------------------------------------------
+
+def _json_safe(value: Any) -> Any:
+    """Recursively replace NaN/Inf floats with None so output is RFC-8259 JSON.
+
+    Browsers reject the ``NaN`` literal in ``JSON.parse`` even though Python's
+    ``json`` module emits it by default. Any feed containing one bad value
+    causes the dashboard to fall back to sample data and show the demo banner.
+    Pandas/numpy NA values also get normalised to None here.
+    """
+    if value is None:
+        return None
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    # pandas / numpy scalars
+    try:
+        if pd.isna(value):  # type: ignore[arg-type]
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -758,8 +790,12 @@ def main() -> None:
 
     for filename, data in views.items():
         out_path = SITE_DATA / filename
+        # Sanitise NaN/Inf to null before writing; browsers reject `NaN` literals
+        # in JSON.parse() and the dashboard fell back to sample data when AEMO
+        # spot intervals were missing.
+        clean = _json_safe(data)
         with out_path.open("w") as f:
-            json.dump(data, f, indent=2)
+            json.dump(clean, f, indent=2, allow_nan=False)
         _LOG.info("Wrote %s", out_path)
 
     _LOG.info("Aggregation complete.")
