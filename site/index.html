@@ -335,6 +335,45 @@ const PAPER = '#F2EFE7';
 const RED   = '#E05252';
 
 // ---------------------------------------------------------------------------
+// Time formatting: all chart times rendered in Australia/Brisbane (AEST, UTC+10).
+// Data on the wire is always UTC; we format for display only.
+// ---------------------------------------------------------------------------
+const BRIS_TZ = 'Australia/Brisbane';
+const _fmtDateTime = new Intl.DateTimeFormat('en-AU', {
+  timeZone: BRIS_TZ, day: 'numeric', month: 'short',
+  hour: 'numeric', minute: '2-digit', hour12: true,
+});
+const _fmtDate = new Intl.DateTimeFormat('en-AU', {
+  timeZone: BRIS_TZ, day: 'numeric', month: 'short',
+});
+const _fmtTime = new Intl.DateTimeFormat('en-AU', {
+  timeZone: BRIS_TZ, hour: 'numeric', hour12: true,
+});
+const _fmtHourMin = new Intl.DateTimeFormat('en-AU', {
+  timeZone: BRIS_TZ, hour: '2-digit', minute: '2-digit', hour12: false,
+});
+
+// Plot tick formatter for time axes: shows date label at midnight Brisbane,
+// hour label otherwise. Brisbane is UTC+10 with no DST, so this is stable.
+function tickAEST(d) {
+  if (!(d instanceof Date)) d = new Date(d);
+  // Get Brisbane hour (0..23)
+  const parts = _fmtHourMin.formatToParts(d);
+  const hh = parts.find(p => p.type === 'hour')?.value || '00';
+  const mm = parts.find(p => p.type === 'minute')?.value || '00';
+  if (hh === '00' && mm === '00') return _fmtDate.format(d);
+  return _fmtTime.format(d);
+}
+function fmtAESTDateTime(d) {
+  if (!(d instanceof Date)) d = new Date(d);
+  return _fmtDateTime.format(d) + ' AEST';
+}
+
+// Convert UTC hour-of-day (0..23) to Brisbane hour-of-day (0..23).
+// Brisbane is UTC+10 with no DST.
+function utcHourToAEST(h) { return ((h + 10) % 24); }
+
+// ---------------------------------------------------------------------------
 // Tab switching
 // ---------------------------------------------------------------------------
 // Per-tab redraw callbacks. Charts in hidden tabs render with clientWidth=0,
@@ -468,31 +507,71 @@ function renderFlexStack(d) {
   }
 
   const times = d.intervals.map(s => new Date(s));
-  const upData    = times.map((t, i) => ({ t, v: d.flex_up_kw[i],  label: 'Flex up' }));
-  const downData  = times.map((t, i) => ({ t, v: d.flex_down_kw[i], label: 'Flex down' }));
-  const priceData = times.map((t, i) => ({ t, v: d.price_signal[i] }));
+  const upData   = times.map((t, i) => ({ t, v: d.flex_up_kw[i],   label: 'Flex up' }));
+  const downData = times.map((t, i) => ({ t, v: d.flex_down_kw[i], label: 'Flex down' }));
+  const priceRaw = times.map((t, i) => ({ t, p: d.price_signal[i] }));
+
+  // Compute kW range and price range for dual-axis scaling.
+  const kwMaxUp   = Math.max(0, ...upData.map(r => r.v ?? 0));
+  const kwMaxDown = Math.max(0, ...downData.map(r => r.v ?? 0));
+  const kwMax     = Math.max(kwMaxUp, kwMaxDown, 1);
+  const priceVals = priceRaw.map(r => r.p).filter(v => v != null && Number.isFinite(v));
+  const priceMin  = priceVals.length ? Math.min(0, ...priceVals) : 0;
+  const priceMax  = priceVals.length ? Math.max(...priceVals)    : 1;
+  const priceRange = Math.max(priceMax - priceMin, 0.01);
+  // Map price -> kW domain so the gold line is visible alongside flex areas.
+  const priceToKw = p => ((p - priceMin) / priceRange) * kwMax;
+  const kwToPrice = k => (k / kwMax) * priceRange + priceMin;
+  const priceData = priceRaw.map(r => ({
+    t: r.t,
+    v: r.p == null ? null : priceToKw(r.p),
+    p: r.p,
+  }));
+
+  // Right-side ticks for the price axis: 5 evenly-spaced ticks across the price range.
+  const priceTicks = [];
+  for (let i = 0; i <= 5; i++) {
+    const p = priceMin + (i / 5) * priceRange;
+    priceTicks.push({ p, kw: priceToKw(p) });
+  }
 
   const plot = window.Plot.plot({
     width: el.parentElement.clientWidth - 32,
-    height: 340,
-    marginRight: 60,
-    x: { type: 'utc', label: 'Time (UTC)' },
-    y: { label: 'kW (cohort total)', grid: true },
-    color: { domain: ['Flex up', 'Flex down'], range: [TEAL, RUST] },
+    height: 360,
+    marginRight: 70,
+    x: { type: 'utc', label: 'Time (AEST)', tickFormat: tickAEST },
+    y: { label: 'kW (cohort total)', grid: true, domain: [0, kwMax * 1.05] },
+    color: { domain: ['Flex up', 'Flex down', 'Price'], range: [TEAL, RUST, GOLD], legend: true },
     marks: [
-      window.Plot.areaY(upData,   { x: 't', y: 'v', fill: TEAL,  fillOpacity: 0.35, tip: true }),
+      window.Plot.areaY(upData,   { x: 't', y: 'v', fill: TEAL,  fillOpacity: 0.35, tip: true,
+        title: r => r.v == null ? 'no data' : `${fmtAESTDateTime(r.t)}\nFlex up: ${r.v.toFixed(1)} kW` }),
       window.Plot.lineY(upData,   { x: 't', y: 'v', stroke: TEAL,  strokeWidth: 2 }),
-      window.Plot.areaY(downData, { x: 't', y: 'v', fill: RUST,  fillOpacity: 0.25, tip: true }),
+      window.Plot.areaY(downData, { x: 't', y: 'v', fill: RUST,  fillOpacity: 0.25, tip: true,
+        title: r => r.v == null ? 'no data' : `${fmtAESTDateTime(r.t)}\nFlex down: ${r.v.toFixed(1)} kW` }),
       window.Plot.lineY(downData, { x: 't', y: 'v', stroke: RUST,  strokeWidth: 2 }),
-      window.Plot.lineY(priceData, {
+      // Price line on the kW axis (rescaled), tooltip shows real $/kWh.
+      window.Plot.lineY(priceData.filter(r => r.v != null), {
         x: 't', y: 'v',
-        stroke: GOLD, strokeWidth: 1.5, strokeDasharray: '4 2',
-        title: d => d.v == null ? 'Price: n/a' : `Price: $${d.v.toFixed(4)}/kWh`,
+        stroke: GOLD, strokeWidth: 2.5, strokeDasharray: '5 3',
+        tip: true,
+        title: r => `${fmtAESTDateTime(r.t)}\nPrice: $${r.p.toFixed(4)}/kWh`,
+      }),
+      // Right-side price-axis ticks and labels.
+      window.Plot.text(priceTicks, {
+        x: () => times[times.length - 1] || new Date(),
+        y: 'kw',
+        text: r => `$${r.p.toFixed(2)}`,
+        textAnchor: 'start', dx: 8, fill: GOLD, fontSize: 11,
       }),
     ]
   });
   el.innerHTML = '';
   el.appendChild(plot);
+  // Right-axis label (manually positioned, since Plot has one y-scale per panel).
+  const lbl = document.createElement('div');
+  lbl.className = 'text-xs text-ink/60 mt-1 text-right pr-2';
+  lbl.textContent = `Right axis: price ($/kWh)  \u2014  Brisbane time, AEST`;
+  el.appendChild(lbl);
 }
 
 // ---------------------------------------------------------------------------
@@ -681,7 +760,7 @@ function drawCurtailmentHeatmap() {
     d.hours.forEach((h, hi) => {
       const v = grid[pi] && grid[pi][hi] != null ? grid[pi][hi] : 0;
       if (v > maxV) maxV = v;
-      data.push({ postcode: pc, hour: h, value: v });
+      data.push({ postcode: pc, hour: h, hour_aest: utcHourToAEST(h), value: v });
     });
   });
 
@@ -701,7 +780,12 @@ function drawCurtailmentHeatmap() {
     width: el.parentElement.clientWidth - 32,
     height: Math.max(120, d.postcode_prefixes.length * 36 + 80),
     marginLeft: 60,
-    x: { label: 'Hour of day (UTC)', tickFormat: t => `${t}:00` },
+    x: {
+      label: 'Hour of day (AEST)',
+      domain: Array.from({length: 24}, (_, i) => i),
+      ticks: [0,3,6,9,12,15,18,21],
+      tickFormat: h => `${h}:00`,
+    },
     y: { label: 'Postcode prefix', domain: d.postcode_prefixes },
     color: {
       type: 'sequential', scheme: metric.scheme, domain: colorDomain,
@@ -709,10 +793,10 @@ function drawCurtailmentHeatmap() {
     },
     marks: [
       window.Plot.cell(data, {
-        x: 'hour', y: 'postcode',
+        x: 'hour_aest', y: 'postcode',
         fill: 'value',
         tip: true,
-        title: r => `${r.postcode} at ${r.hour}:00 UTC: ${metric.fmt(r.value)}`,
+        title: r => `${r.postcode} at ${r.hour_aest}:00 AEST: ${metric.fmt(r.value)}`,
       }),
     ]
   });
@@ -741,7 +825,7 @@ function renderCounterfactual(d) {
   const plot = window.Plot.plot({
     width: el.parentElement.clientWidth - 32,
     height: 340,
-    x: { type: 'utc', label: 'Time (UTC)' },
+    x: { type: 'utc', label: 'Time (AEST)', tickFormat: tickAEST },
     y: { label: 'Cumulative savings (AUD)', grid: true },
     marks: [
       window.Plot.areaY(cumData, { x: 't', y: 'v', fill: GOLD, fillOpacity: 0.3 }),
@@ -836,7 +920,7 @@ function renderSpreadRegion(region) {
     width: el.parentElement.clientWidth - 32,
     height: 340,
     marginRight: 16,
-    x: { type: 'utc', label: 'Time (UTC)' },
+    x: { type: 'utc', label: 'Time (AEST)', tickFormat: tickAEST },
     y: { label: 'Price ($/kWh)', grid: true },
     color: { domain: ['Buy price', 'Export price'], range: [TEAL, GOLD], legend: true },
     marks,
@@ -907,7 +991,7 @@ function renderV2gDuty(d) {
   const plot = window.Plot.plot({
     width: el.parentElement.clientWidth - 32,
     height: 200,
-    x: { type: 'utc', label: 'Time (UTC)' },
+    x: { type: 'utc', label: 'Time (AEST)', tickFormat: tickAEST },
     y: { label: '% EVs', domain: [0, 100] },
     color: { domain: states, range: colours, legend: true },
     marks: [
@@ -935,7 +1019,7 @@ function renderV2gDispatch(d) {
   const plot = window.Plot.plot({
     width: el.parentElement.clientWidth - 32,
     height: 280,
-    x: { type: 'utc', label: 'Time (UTC)' },
+    x: { type: 'utc', label: 'Time (AEST)', tickFormat: tickAEST },
     y: { label: 'Setpoint (kW, + = charging, - = discharging)', grid: true },
     marks: [
       window.Plot.areaY(battData, { x: 't', y: 'v', fill: TEAL, fillOpacity: 0.4, tip: true }),
@@ -967,18 +1051,19 @@ function renderShadowByHour(d) {
   }
   const data = d.hours.map((h, i) => ({
     hour: h,
+    hour_aest: utcHourToAEST(h),
     mean: d.mean_shadow_energy_price[i] || 0,
     p25:  d.p25_shadow_energy_price[i]  || 0,
     p75:  d.p75_shadow_energy_price[i]  || 0,
-  }));
+  })).sort((a, b) => a.hour_aest - b.hour_aest);
   const plot = window.Plot.plot({
     width: el.parentElement.clientWidth - 32,
     height: 220,
-    x: { label: 'Hour of day (UTC)', tickFormat: h => `${h}:00` },
+    x: { label: 'Hour of day (AEST)', domain: Array.from({length: 24}, (_, i) => i), ticks: [0,3,6,9,12,15,18,21], tickFormat: h => `${h}:00` },
     y: { label: 'Shadow energy price ($/kWh)', grid: true },
     marks: [
-      window.Plot.areaY(data, { x: 'hour', y1: 'p25', y2: 'p75', fill: TEAL, fillOpacity: 0.3 }),
-      window.Plot.lineY(data, { x: 'hour', y: 'mean', stroke: TEAL, strokeWidth: 2.5, tip: true }),
+      window.Plot.areaY(data, { x: 'hour_aest', y1: 'p25', y2: 'p75', fill: TEAL, fillOpacity: 0.3 }),
+      window.Plot.lineY(data, { x: 'hour_aest', y: 'mean', stroke: TEAL, strokeWidth: 2.5, tip: true }),
       window.Plot.ruleY([0], { stroke: INK, strokeOpacity: 0.15 }),
     ]
   });
@@ -998,14 +1083,14 @@ function renderShadowHeatmap(elId, d, prefixes, labelField) {
   const data = [];
   prefixes.forEach((pc, pi) => {
     for (let h = 0; h < 24; h++) {
-      data.push({ postcode: pc, hour: h, shadow: (d[pi] && d[pi][h]) || 0 });
+      data.push({ postcode: pc, hour: h, hour_aest: utcHourToAEST(h), shadow: (d[pi] && d[pi][h]) || 0 });
     }
   });
   const plot = window.Plot.plot({
     width: el.parentElement.clientWidth - 32,
     height: Math.max(100, prefixes.length * 36 + 60),
     marginLeft: 60,
-    x: { label: 'Hour of day (UTC)', tickFormat: h => `${h}:00` },
+    x: { label: 'Hour of day (AEST)', domain: Array.from({length: 24}, (_, i) => i), ticks: [0,3,6,9,12,15,18,21], tickFormat: h => `${h}:00` },
     y: { label: 'Postcode prefix', domain: prefixes },
     color: {
       type: 'sequential',
@@ -1016,12 +1101,12 @@ function renderShadowHeatmap(elId, d, prefixes, labelField) {
     },
     marks: [
       window.Plot.cell(data, {
-        x: 'hour', y: 'postcode',
+        x: 'hour_aest', y: 'postcode',
         fill: 'shadow',
         tip: true,
-        title: d => d.shadow == null
-          ? `${d.postcode} at ${d.hour}:00: n/a`
-          : `${d.postcode} at ${d.hour}:00: $${d.shadow.toFixed(4)}/kWh`,
+        title: r => r.shadow == null
+          ? `${r.postcode} at ${r.hour_aest}:00 AEST: n/a`
+          : `${r.postcode} at ${r.hour_aest}:00 AEST: $${r.shadow.toFixed(4)}/kWh`,
       }),
     ]
   });
