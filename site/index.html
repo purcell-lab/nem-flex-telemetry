@@ -453,7 +453,7 @@ function renderFlexStack(d) {
       window.Plot.lineY(priceData, {
         x: 't', y: 'v',
         stroke: GOLD, strokeWidth: 1.5, strokeDasharray: '4 2',
-        title: d => `Price: $${d.v.toFixed(4)}/kWh`,
+        title: d => d.v == null ? 'Price: n/a' : `Price: $${d.v.toFixed(4)}/kWh`,
       }),
     ]
   });
@@ -561,7 +561,9 @@ function renderEnvelopeHeatmap(d) {
         x: 'hour', y: 'postcode',
         fill: 'compliance',
         tip: true,
-        title: d => `${d.postcode} at ${d.hour}:00: ${(d.compliance * 100).toFixed(1)}% compliant`,
+        title: d => d.compliance == null
+          ? `${d.postcode} at ${d.hour}:00: n/a`
+          : `${d.postcode} at ${d.hour}:00: ${(d.compliance * 100).toFixed(1)}% compliant`,
       }),
     ]
   });
@@ -868,7 +870,9 @@ function renderShadowHeatmap(elId, d, prefixes, labelField) {
         x: 'hour', y: 'postcode',
         fill: 'shadow',
         tip: true,
-        title: d => `${d.postcode} at ${d.hour}:00: $${d.shadow.toFixed(4)}/kWh`,
+        title: d => d.shadow == null
+          ? `${d.postcode} at ${d.hour}:00: n/a`
+          : `${d.postcode} at ${d.hour}:00: $${d.shadow.toFixed(4)}/kWh`,
       }),
     ]
   });
