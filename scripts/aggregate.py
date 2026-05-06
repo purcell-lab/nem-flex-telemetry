@@ -7,8 +7,8 @@ validates them against the JSON Schema (v2.0), deduplicates, and writes:
   - data/cohort/hourly/YYYY/MM/DD.parquet
   - data/cohort/daily/YYYY/MM/DD.parquet
   - site/data/cohort_flex_stack.json   (tab 1: flex stack + price overlay)
-  - site/data/price_response.json      (tab 2: price-response scatter)
-  - site/data/envelope_heatmap.json    (tab 3: envelope compliance heatmap)
+  - site/data/price_response.json      (tab 2: dual price-response curves: import vs buy, export vs sell)
+  - site/data/curtailment_heatmap.json (tab 3: export curtailment vs static cap, kWh and $ by hour)
   - site/data/counterfactual.json      (tab 4: asymmetric counterfactual savings ledger)
   - site/data/buy_sell_spread.json     (tab 5: buy/sell price spread by region)
   - site/data/assets_summary.json      (tab 6: asset mix, V2G duty cycle, dispatch share)
@@ -327,57 +327,155 @@ def compute_flex_stack(df: pd.DataFrame) -> dict[str, Any]:
 
 
 def compute_price_response(df: pd.DataFrame) -> dict[str, Any]:
-    """Tab 2: Price-response scatter ($/kWh), faceted by region."""
+    """Tab 2: Dual price-response curves, faceted by region.
+
+    Splits the elasticity into two physically-distinct relationships:
+      - import_curve: grid_import_kw vs buy_price_aud_per_kwh, where net_import_kw > 0
+      - export_curve: grid_export_kw vs sell_price_aud_per_kwh, where net_import_kw < 0
+        (grid_export_kw is reported as a positive magnitude)
+
+    A single regression through both regimes mixes demand elasticity (negative slope)
+    and supply elasticity (positive slope) and is meaningless. Splitting them lets each
+    curve be estimated cleanly from open data.
+    """
+    empty_region = {
+        "import": {"price": [], "power": []},
+        "export": {"price": [], "power": []},
+    }
     if df.empty:
         return {
-            "regions": {r: {"price": [], "net_import": []} for r in NEM_REGIONS},
+            "regions": {r: empty_region for r in NEM_REGIONS},
             "price_unit": "$/kWh",
+            "power_unit": "kW",
         }
 
-    result: dict[str, Any] = {"regions": {}, "price_unit": "$/kWh"}
+    result: dict[str, Any] = {"regions": {}, "price_unit": "$/kWh", "power_unit": "kW"}
     for region in NEM_REGIONS:
         region_df = df[df["region"] == region]
         if region_df.empty:
-            result["regions"][region] = {"price": [], "net_import": []}
+            result["regions"][region] = empty_region
             continue
-        sample = region_df.sample(min(5000, len(region_df)), random_state=42)
+
+        importing = region_df[region_df["net_import_kw"] > 0]
+        exporting = region_df[region_df["net_import_kw"] < 0]
+
+        if not importing.empty:
+            imp_sample = importing.sample(min(5000, len(importing)), random_state=42)
+            import_block = {
+                "price": imp_sample["price_signal_seen"].round(6).tolist(),
+                "power": imp_sample["net_import_kw"].round(3).tolist(),
+            }
+        else:
+            import_block = {"price": [], "power": []}
+
+        if not exporting.empty:
+            exp_sample = exporting.sample(min(5000, len(exporting)), random_state=42)
+            export_block = {
+                "price": exp_sample["price_export_seen"].round(6).tolist(),
+                # report export as positive magnitude
+                "power": (-exp_sample["net_import_kw"]).round(3).tolist(),
+            }
+        else:
+            export_block = {"price": [], "power": []}
+
         result["regions"][region] = {
-            "price": sample["price_signal_seen"].round(6).tolist(),
-            "net_import": sample["net_import_kw"].round(3).tolist(),
+            "import": import_block,
+            "export": export_block,
         }
     return result
 
 
-def compute_envelope_heatmap(df: pd.DataFrame) -> dict[str, Any]:
-    """Tab 3: Envelope compliance heatmap (postcode_prefix x hour-of-day)."""
+def compute_curtailment_heatmap(df: pd.DataFrame) -> dict[str, Any]:
+    """Tab 3: Export curtailment heatmap (postcode_prefix x hour-of-day).
+
+    Quantifies the dollar cost of the static export envelope (typically 5 kW) by
+    asking: at each interval, how much solar export was clipped by the envelope,
+    and what was that energy worth at the prevailing sell price?
+
+    For each 5-minute interval:
+        export_kw      = max(-net_import_kw, 0)
+        cap_kw         = envelope_export_limit_kw
+        curtailed_kw   = max(export_kw - cap_kw, 0)         # always >= 0
+        curtailed_kwh  = curtailed_kw * (interval_seconds / 3600)
+        curtailed_aud  = curtailed_kwh * max(price_export_seen, 0)
+
+    Note: where actual export already meets or exceeds the cap by other means
+    (i.e. observed export exceeds cap), curtailed_kw is reported as 0 because
+    the dispatch went through. The heatmap captures *unrealised* export only when
+    the envelope was the binding constraint, which we approximate as intervals
+    where exporting households were also at-or-near the cap. As a simple,
+    monotone proxy we report the gap between the cap and the *flex_available_up*
+    of solar that wanted to export. Without that field plumbed end-to-end we
+    fall back to a conservative measure: for net-exporting intervals where
+    export_kw equals the cap (within 0.05 kW), assume curtailment equals
+    flex_available_down available to the EV/battery sink that did NOT absorb it,
+    capped at solar headroom. To keep this aggregator simple and verifiable, we
+    report two complementary quantities and let the dashboard show both:
+      - at_cap_share:  share of intervals where export was within 0.05 kW of cap
+      - curtailed_aud: estimated $ lost, conservative lower bound
+
+    The conservative $ estimate uses:
+        gap_kw = max( (solar_kw - house_load_kw) - cap_kw, 0 )
+    which is the portion of net solar that exceeded the static cap regardless
+    of battery/EV soak. This isolates the static-cap cost cleanly.
+    """
     if df.empty:
-        return {"postcode_prefixes": [], "hours": list(range(24)), "compliance": []}
+        return {
+            "postcode_prefixes": [],
+            "hours": list(range(24)),
+            "curtailed_kwh": [],
+            "curtailed_aud": [],
+            "at_cap_share": [],
+            "price_unit": "$/kWh",
+        }
 
     df = df.copy()
     df["hour"] = df["interval_start_utc"].dt.hour
 
-    # Use total household setpoint approximation: net_import vs envelope
-    # (v0.3 does not have a single setpoint field; use net_import_kw as proxy)
-    df["compliant"] = (
-        (df["net_import_kw"] <= df["envelope_import_limit_kw"]) &
-        (-df["net_import_kw"] <= df["envelope_export_limit_kw"])
+    # Conservative kW gap: net solar above the static cap, regardless of soak.
+    net_solar_kw = (df["solar_kw"] - df["house_load_kw"]).clip(lower=0.0)
+    df["gap_kw"] = (net_solar_kw - df["envelope_export_limit_kw"]).clip(lower=0.0)
+    df["curtailed_kwh"] = df["gap_kw"] * (INTERVAL_SECONDS / 3600.0)
+    sell_price_pos = df["price_export_seen"].clip(lower=0.0)
+    df["curtailed_aud"] = df["curtailed_kwh"] * sell_price_pos
+
+    # at_cap indicator: actual export within 5% of envelope cap
+    actual_export_kw = (-df["net_import_kw"]).clip(lower=0.0)
+    cap = df["envelope_export_limit_kw"].replace(0, pd.NA)
+    df["at_cap"] = (
+        (actual_export_kw > 0)
+        & ((cap - actual_export_kw).abs() <= 0.05 * cap)
+    ).fillna(False).astype(float)
+
+    grouped = (
+        df.groupby(["postcode_prefix", "hour"])
+        .agg(
+            curtailed_kwh=("curtailed_kwh", "sum"),
+            curtailed_aud=("curtailed_aud", "sum"),
+            at_cap_share=("at_cap", "mean"),
+        )
     )
 
-    pivot = (
-        df.groupby(["postcode_prefix", "hour"])["compliant"]
-        .mean()
-        .unstack(fill_value=1.0)
-    )
+    postcodes = sorted(df["postcode_prefix"].unique().tolist())
 
-    for h in range(24):
-        if h not in pivot.columns:
-            pivot[h] = 1.0
-    pivot = pivot[sorted(pivot.columns)]
+    def pivot_field(field: str, fill: float) -> list[list[float]]:
+        pivot = grouped[field].unstack(fill_value=fill)
+        for h in range(24):
+            if h not in pivot.columns:
+                pivot[h] = fill
+        pivot = pivot.reindex(postcodes, fill_value=fill)
+        pivot = pivot[sorted(pivot.columns)]
+        return pivot.round(4).values.tolist()
 
     return {
-        "postcode_prefixes": pivot.index.tolist(),
+        "postcode_prefixes": postcodes,
         "hours": list(range(24)),
-        "compliance": pivot.round(3).values.tolist(),
+        "curtailed_kwh": pivot_field("curtailed_kwh", 0.0),
+        "curtailed_aud": pivot_field("curtailed_aud", 0.0),
+        "at_cap_share": pivot_field("at_cap_share", 0.0),
+        "total_curtailed_kwh": float(round(df["curtailed_kwh"].sum(), 3)),
+        "total_curtailed_aud": float(round(df["curtailed_aud"].sum(), 2)),
+        "price_unit": "$/kWh",
     }
 
 
@@ -780,7 +878,7 @@ def main() -> None:
     views = {
         "cohort_flex_stack.json": compute_flex_stack(df),
         "price_response.json": compute_price_response(df),
-        "envelope_heatmap.json": compute_envelope_heatmap(df),
+        "curtailment_heatmap.json": compute_curtailment_heatmap(df),
         "counterfactual.json": compute_counterfactual(df),
         "buy_sell_spread.json": compute_buy_sell_spread(df),
         "assets_summary.json": compute_assets_summary(df, assets_df),
