@@ -51,7 +51,7 @@
     .tab-btn:not(.active) { color: #6b7280; border-bottom: 3px solid transparent; }
     .tab-panel { display: none; }
     .tab-panel.active { display: block; }
-    #chart-flex, #chart-price, #chart-envelope, #chart-counterfactual, #chart-spread {
+    #chart-flex, #chart-price, #chart-curtailment, #chart-counterfactual, #chart-spread {
       min-height: 340px;
     }
     /* Plot override: match palette */
@@ -113,10 +113,10 @@
         Cohort flex stack
       </button>
       <button class="tab-btn px-4 py-3 text-sm whitespace-nowrap" data-tab="price" role="tab" aria-selected="false">
-        Price-response curve
+        Price-response curves
       </button>
-      <button class="tab-btn px-4 py-3 text-sm whitespace-nowrap" data-tab="envelope" role="tab" aria-selected="false">
-        Envelope compliance
+      <button class="tab-btn px-4 py-3 text-sm whitespace-nowrap" data-tab="curtailment" role="tab" aria-selected="false">
+        Export curtailment
       </button>
       <button class="tab-btn px-4 py-3 text-sm whitespace-nowrap" data-tab="counterfactual" role="tab" aria-selected="false">
         Counterfactual ledger
@@ -146,13 +146,17 @@
       </div>
     </section>
 
-    <!-- Tab b: Price-response curve -->
+    <!-- Tab b: Dual price-response curves -->
     <section class="tab-panel" id="tab-price" role="tabpanel">
       <div class="mb-4">
-        <h2 class="text-xl font-semibold text-ink mb-1">Price-response curve</h2>
+        <h2 class="text-xl font-semibold text-ink mb-1">Price-response curves</h2>
         <p class="text-sm text-ink/60">
-          Net import (kW) versus buy price signal seen ($/kWh), faceted by NEM region.
-          The negative slope makes the demand-response curve estimable from open data for the first time.
+          Two distinct elasticities. <span class="font-semibold text-teal">Import</span>:
+          grid import (kW) versus buy price ($/kWh) for net-importing intervals
+          (expected slope: negative). <span class="font-semibold" style="color:#D78562">Export</span>:
+          grid export (kW, positive magnitude) versus sell price ($/kWh) for
+          net-exporting intervals (expected slope: positive). The vertical gap between
+          the two curves at any price level is the live buy/sell spread the optimiser is working with.
         </p>
       </div>
       <div id="region-selector" class="flex gap-2 mb-4 flex-wrap">
@@ -163,17 +167,33 @@
       </div>
     </section>
 
-    <!-- Tab c: Envelope compliance heatmap -->
-    <section class="tab-panel" id="tab-envelope" role="tabpanel">
+    <!-- Tab c: Export curtailment heatmap -->
+    <section class="tab-panel" id="tab-curtailment" role="tabpanel">
       <div class="mb-4">
-        <h2 class="text-xl font-semibold text-ink mb-1">Envelope compliance heatmap</h2>
+        <h2 class="text-xl font-semibold text-ink mb-1">Export curtailment vs static cap</h2>
         <p class="text-sm text-ink/60">
-          Proportion of 5-minute intervals where the optimiser setpoint was within the DNSP envelope,
-          by postcode prefix and hour of day. Green = fully compliant. Red = frequent violations.
+          What is the static export envelope (typically 5 kW) costing the cohort? For each interval,
+          we compute net solar above the cap and value it at the prevailing sell price ($/kWh).
+          Heatmap toggles between AUD lost, kWh curtailed, and the share of intervals where
+          actual export was sitting at the cap. This is the live dollar case for replacing the
+          static cap with a CSIP-AUS dynamic envelope.
         </p>
       </div>
+      <div class="bg-ink rounded-xl p-6 mb-6 grid grid-cols-1 sm:grid-cols-2 gap-4 text-center">
+        <div>
+          <div class="text-xs text-paper/60 uppercase tracking-widest mb-2">Total energy curtailed</div>
+          <div id="total-curt-kwh" class="font-display text-3xl font-bold text-teal">-- kWh</div>
+        </div>
+        <div>
+          <div class="text-xs text-paper/60 uppercase tracking-widest mb-2">Total value lost</div>
+          <div id="total-curt-aud" class="font-display text-3xl font-bold text-gold">$--</div>
+        </div>
+      </div>
+      <div id="curt-metric-selector" class="flex gap-2 mb-4 flex-wrap">
+        <!-- Metric buttons injected by JS -->
+      </div>
       <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
-        <div id="chart-envelope"></div>
+        <div id="chart-curtailment"></div>
       </div>
     </section>
 
@@ -317,6 +337,19 @@ const RED   = '#E05252';
 // ---------------------------------------------------------------------------
 // Tab switching
 // ---------------------------------------------------------------------------
+// Per-tab redraw callbacks. Charts in hidden tabs render with clientWidth=0,
+// producing negative widths and NaN paths. Re-running the render function after
+// the tab becomes visible fixes that.
+const _tabRedraw = {};
+
+function onTabActivated(tab) {
+  const fn = _tabRedraw[tab];
+  if (typeof fn === 'function') {
+    // Defer one frame so the panel is laid out before measuring clientWidth.
+    requestAnimationFrame(() => { try { fn(); } catch (e) { console.error(e); } });
+  }
+}
+
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     const tab = btn.dataset.tab;
@@ -327,6 +360,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     document.querySelectorAll('.tab-panel').forEach(p => {
       p.classList.toggle('active', p.id === `tab-${tab}`);
     });
+    onTabActivated(tab);
   });
 });
 
@@ -386,11 +420,11 @@ async function loadData() {
     }
   }
 
-  const [status, flexStack, priceResp, envelope, counterfactual, buySellSpread, assetsSummary, shadowPrices] = await Promise.all([
+  const [status, flexStack, priceResp, curtailment, counterfactual, buySellSpread, assetsSummary, shadowPrices] = await Promise.all([
     tryLoad('data/status.json', 'status'),
     tryLoad('data/cohort_flex_stack.json', 'cohort_flex_stack'),
     tryLoad('data/price_response.json', 'price_response'),
-    tryLoad('data/envelope_heatmap.json', 'envelope_heatmap'),
+    tryLoad('data/curtailment_heatmap.json', 'curtailment_heatmap'),
     tryLoad('data/counterfactual.json', 'counterfactual'),
     tryLoad('data/buy_sell_spread.json', 'buy_sell_spread'),
     tryLoad('data/assets_summary.json', 'assets_summary'),
@@ -403,7 +437,7 @@ async function loadData() {
     if (banner) banner.classList.remove('hidden');
   }
 
-  return { status, flexStack, priceResp, envelope, counterfactual, buySellSpread, assetsSummary, shadowPrices };
+  return { status, flexStack, priceResp, curtailment, counterfactual, buySellSpread, assetsSummary, shadowPrices };
 }
 
 // ---------------------------------------------------------------------------
@@ -462,14 +496,21 @@ function renderFlexStack(d) {
 }
 
 // ---------------------------------------------------------------------------
-// Chart b: Price-response scatter
+// Chart b: Dual price-response curves (import vs buy, export vs sell)
 // ---------------------------------------------------------------------------
 let _priceData = null;
 let _activeRegion = null;
 
+function _hasPriceData(rd) {
+  if (!rd) return false;
+  const imp = rd.import || { price: [] };
+  const exp = rd.export || { price: [] };
+  return (imp.price && imp.price.length > 0) || (exp.price && exp.price.length > 0);
+}
+
 function renderPriceResponse(d) {
   _priceData = d;
-  const regions = Object.keys(d.regions).filter(r => d.regions[r].price.length > 0);
+  const regions = Object.keys(d.regions).filter(r => _hasPriceData(d.regions[r]));
   const selector = document.getElementById('region-selector');
   selector.innerHTML = '';
 
@@ -505,65 +546,173 @@ function renderPriceResponse(d) {
 function renderPriceRegion(region) {
   const el = document.getElementById('chart-price');
   const rd = _priceData.regions[region];
-  if (!rd || rd.price.length === 0) {
+  if (!rd || !_hasPriceData(rd)) {
     el.innerHTML = `<p class="text-ink/40 text-center py-12">No data for ${region}.</p>`;
     return;
   }
 
-  const data = rd.price.map((p, i) => ({ price: p, net_import: rd.net_import[i] }));
+  const imp = rd.import || { price: [], power: [] };
+  const exp = rd.export || { price: [], power: [] };
+
+  const data = [];
+  for (let i = 0; i < imp.price.length; i++) {
+    data.push({ price: imp.price[i], power: imp.power[i], series: 'Import vs buy' });
+  }
+  for (let i = 0; i < exp.price.length; i++) {
+    data.push({ price: exp.price[i], power: exp.power[i], series: 'Export vs sell' });
+  }
+
+  const importData = data.filter(d => d.series === 'Import vs buy');
+  const exportData = data.filter(d => d.series === 'Export vs sell');
+
+  const marks = [
+    window.Plot.ruleX([0], { stroke: INK, strokeOpacity: 0.15 }),
+    window.Plot.ruleY([0], { stroke: INK, strokeOpacity: 0.15 }),
+  ];
+  if (importData.length > 0) {
+    marks.push(window.Plot.dot(importData, {
+      x: 'price', y: 'power', r: 3,
+      fill: TEAL, fillOpacity: 0.45, stroke: 'none', tip: true,
+      title: d => `Import: ${d.power} kW at ${d.price} $/kWh buy`,
+    }));
+    if (importData.length >= 5) {
+      marks.push(window.Plot.linearRegressionY(importData, {
+        x: 'price', y: 'power', stroke: TEAL, strokeWidth: 2,
+      }));
+    }
+  }
+  if (exportData.length > 0) {
+    marks.push(window.Plot.dot(exportData, {
+      x: 'price', y: 'power', r: 3,
+      fill: RUST, fillOpacity: 0.45, stroke: 'none', tip: true,
+      title: d => `Export: ${d.power} kW at ${d.price} $/kWh sell`,
+    }));
+    if (exportData.length >= 5) {
+      marks.push(window.Plot.linearRegressionY(exportData, {
+        x: 'price', y: 'power', stroke: RUST, strokeWidth: 2,
+      }));
+    }
+  }
 
   const plot = window.Plot.plot({
     width: el.parentElement.clientWidth - 32,
-    height: 340,
-    x: { label: 'Buy price signal seen ($/kWh)', grid: true },
-    y: { label: 'Net import (kW)', grid: true },
-    marks: [
-      window.Plot.dot(data, {
-        x: 'price', y: 'net_import',
-        r: 3,
-        fill: TEAL, fillOpacity: 0.5,
-        stroke: 'none',
-        tip: true,
-      }),
-      window.Plot.linearRegressionY(data, { x: 'price', y: 'net_import', stroke: RUST, strokeWidth: 2 }),
-    ]
+    height: 380,
+    x: { label: 'Price ($/kWh)  \u2192  buy (teal) or sell (rust)', grid: true },
+    y: { label: 'Grid power (kW)  \u2192  import (teal) or export (rust)', grid: true },
+    color: {
+      domain: ['Import vs buy', 'Export vs sell'],
+      range: [TEAL, RUST],
+      legend: true,
+    },
+    marks,
   });
   el.innerHTML = '';
   el.appendChild(plot);
 }
 
 // ---------------------------------------------------------------------------
-// Chart c: Envelope compliance heatmap
+// Chart c: Export curtailment heatmap (replaces envelope compliance)
 // ---------------------------------------------------------------------------
-function renderEnvelopeHeatmap(d) {
-  const el = document.getElementById('chart-envelope');
-  if (!d.postcode_prefixes || d.postcode_prefixes.length === 0) {
+let _curtData = null;
+let _activeCurtMetric = 'aud';
+
+const CURT_METRICS = [
+  { key: 'aud',       label: 'AUD lost',       field: 'curtailed_aud', unit: '$', scheme: 'YlOrRd', fmt: v => `$${(+v).toFixed(2)}` },
+  { key: 'kwh',       label: 'kWh curtailed',  field: 'curtailed_kwh', unit: 'kWh', scheme: 'Blues',  fmt: v => `${(+v).toFixed(2)} kWh` },
+  { key: 'at_cap',    label: 'At-cap share',   field: 'at_cap_share',  unit: '%', scheme: 'Purples', fmt: v => `${((+v) * 100).toFixed(0)}%` },
+];
+
+function renderCurtailmentHeatmap(d) {
+  _curtData = d;
+  const totalKwhEl = document.getElementById('total-curt-kwh');
+  const totalAudEl = document.getElementById('total-curt-aud');
+  if (totalKwhEl && d && d.total_curtailed_kwh != null) {
+    totalKwhEl.textContent = `${(+d.total_curtailed_kwh).toFixed(1)} kWh`;
+  }
+  if (totalAudEl && d && d.total_curtailed_aud != null) {
+    totalAudEl.textContent = `$${(+d.total_curtailed_aud).toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+
+  const selector = document.getElementById('curt-metric-selector');
+  if (selector) {
+    selector.innerHTML = '';
+    CURT_METRICS.forEach((m, idx) => {
+      const btn = document.createElement('button');
+      btn.textContent = m.label;
+      btn.dataset.metric = m.key;
+      btn.className = `px-3 py-1 rounded-full text-sm font-medium border transition-all ${
+        m.key === _activeCurtMetric
+          ? 'bg-teal text-white border-teal'
+          : 'bg-white text-ink border-ink/20 hover:border-teal'
+      }`;
+      btn.addEventListener('click', () => {
+        _activeCurtMetric = m.key;
+        selector.querySelectorAll('button').forEach(b => {
+          b.className = 'px-3 py-1 rounded-full text-sm font-medium border transition-all bg-white text-ink border-ink/20 hover:border-teal';
+        });
+        btn.className = 'px-3 py-1 rounded-full text-sm font-medium border transition-all bg-teal text-white border-teal';
+        drawCurtailmentHeatmap();
+      });
+      selector.appendChild(btn);
+    });
+  }
+
+  drawCurtailmentHeatmap();
+}
+
+function drawCurtailmentHeatmap() {
+  const el = document.getElementById('chart-curtailment');
+  const d = _curtData;
+  if (!el) return;
+  if (!d || !d.postcode_prefixes || d.postcode_prefixes.length === 0) {
     el.innerHTML = '<p class="text-ink/40 text-center py-12">No data yet.</p>';
+    return;
+  }
+  const metric = CURT_METRICS.find(m => m.key === _activeCurtMetric) || CURT_METRICS[0];
+  const grid = d[metric.field] || [];
+  if (grid.length === 0) {
+    el.innerHTML = '<p class="text-ink/40 text-center py-12">No data for this metric.</p>';
     return;
   }
 
   const data = [];
+  let maxV = 0;
   d.postcode_prefixes.forEach((pc, pi) => {
     d.hours.forEach((h, hi) => {
-      data.push({ postcode: pc, hour: h, compliance: d.compliance[pi][hi] });
+      const v = grid[pi] && grid[pi][hi] != null ? grid[pi][hi] : 0;
+      if (v > maxV) maxV = v;
+      data.push({ postcode: pc, hour: h, value: v });
     });
   });
 
+  // Choose a sensible legend domain. For at_cap show full [0,1].
+  // For AUD/kWh, if there's no real signal yet, keep a small but visible scale
+  // so legend ticks read sensibly (avoid ranges like 1e-9).
+  let colorDomain;
+  if (metric.key === 'at_cap') {
+    colorDomain = [0, 1];
+  } else if (maxV < 0.01) {
+    colorDomain = metric.key === 'aud' ? [0, 1] : [0, 1];
+  } else {
+    colorDomain = [0, maxV];
+  }
+
   const plot = window.Plot.plot({
     width: el.parentElement.clientWidth - 32,
-    height: Math.max(120, d.postcode_prefixes.length * 36 + 60),
+    height: Math.max(120, d.postcode_prefixes.length * 36 + 80),
     marginLeft: 60,
-    x: { label: 'Hour of day (UTC)', tickFormat: d => `${d}:00` },
+    x: { label: 'Hour of day (UTC)', tickFormat: t => `${t}:00` },
     y: { label: 'Postcode prefix', domain: d.postcode_prefixes },
-    color: { type: 'sequential', scheme: 'RdYlGn', domain: [0, 1], label: 'Compliance rate', legend: true },
+    color: {
+      type: 'sequential', scheme: metric.scheme, domain: colorDomain,
+      label: metric.label, legend: true,
+    },
     marks: [
       window.Plot.cell(data, {
         x: 'hour', y: 'postcode',
-        fill: 'compliance',
+        fill: 'value',
         tip: true,
-        title: d => d.compliance == null
-          ? `${d.postcode} at ${d.hour}:00: n/a`
-          : `${d.postcode} at ${d.hour}:00: ${(d.compliance * 100).toFixed(1)}% compliant`,
+        title: r => `${r.postcode} at ${r.hour}:00 UTC: ${metric.fmt(r.value)}`,
       }),
     ]
   });
@@ -895,11 +1044,21 @@ function renderShadowPrices(shadowPrices) {
 // ---------------------------------------------------------------------------
 async function main() {
   try {
-    const { status, flexStack, priceResp, envelope, counterfactual, buySellSpread, assetsSummary, shadowPrices } = await loadData();
+    const { status, flexStack, priceResp, curtailment, counterfactual, buySellSpread, assetsSummary, shadowPrices } = await loadData();
     renderStats(status);
     renderFlexStack(flexStack);
     renderPriceResponse(priceResp);
-    renderEnvelopeHeatmap(envelope);
+    renderCurtailmentHeatmap(curtailment);
+
+    // Wire per-tab redraws so charts in initially-hidden tabs render correctly
+    // when the user clicks into them.
+    _tabRedraw.flex          = () => renderFlexStack(flexStack);
+    _tabRedraw.price         = () => { if (_activeRegion) renderPriceRegion(_activeRegion); };
+    _tabRedraw.curtailment   = () => drawCurtailmentHeatmap();
+    _tabRedraw.counterfactual = () => renderCounterfactual(counterfactual);
+    _tabRedraw.spread        = () => { if (_activeSpreadRegion) renderSpreadRegion(_activeSpreadRegion); };
+    _tabRedraw.assets        = () => renderAssets(assetsSummary);
+    _tabRedraw.shadow        = () => renderShadowPrices(shadowPrices);
     renderCounterfactual(counterfactual);
     renderBuySellSpread(buySellSpread);
     renderAssets(assetsSummary);
