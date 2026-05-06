@@ -609,9 +609,11 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
         },
         "price_unit": "$/kWh",
         "explainer": (
-            "Shadow prices reveal the marginal value the optimiser placed on energy and "
-            "binding constraints. Non-zero envelope shadow prices show where the network is "
-            "actually constraining flex, in dollar terms."
+            "Shadow energy price is the LP dual on the switchboard power-balance "
+            "constraint: the marginal cost of one extra kWh of net energy at the "
+            "meter for the current dispatch interval. Envelope shadow prices show "
+            "where the import or export limit is actually constraining flex, in "
+            "dollar terms."
         ),
     }
 
@@ -683,9 +685,11 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
         "envelope_shadow_heatmap": heatmap,
         "price_unit": "$/kWh",
         "explainer": (
-            "Shadow prices reveal the marginal value the optimiser placed on energy and "
-            "binding constraints. Non-zero envelope shadow prices show where the network is "
-            "actually constraining flex, in dollar terms."
+            "Shadow energy price is the LP dual on the switchboard power-balance "
+            "constraint: the marginal cost of one extra kWh of net energy at the "
+            "meter for the current dispatch interval. Envelope shadow prices show "
+            "where the import or export limit is actually constraining flex, in "
+            "dollar terms."
         ),
     }
 

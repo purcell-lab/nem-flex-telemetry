@@ -41,6 +41,7 @@ from .const import (
     CONF_ENTITY_NET_IMPORT,
     CONF_ENTITY_PRICE_EXPORT,
     CONF_ENTITY_PRICE_SIGNAL,
+    CONF_ENTITY_SHADOW_ENERGY,
     CONF_ENTITY_SHADOW_ENVELOPE_EXPORT,
     CONF_ENTITY_SHADOW_ENVELOPE_IMPORT,
     CONF_ENTITY_SHADOW_LOAD_FORECAST,
@@ -474,7 +475,18 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         else:
             _, flex_down = self._derive_flex_headroom(battery_setpoint)
 
-        # Shadow prices (all nullable)
+        # Shadow prices (all nullable, all in $/kWh).
+        #
+        # shadow_energy_price is the headline switchboard power-balance dual,
+        # i.e. the marginal cost of one extra kWh of net energy at the meter.
+        # The four constraint-specific shadows are non-zero only when that
+        # particular constraint is binding for the current interval.
+        shadow_energy_price = _read_state_float_or_none(
+            self.hass, self._config.get(CONF_ENTITY_SHADOW_ENERGY)
+        )
+        if shadow_energy_price is not None:
+            shadow_energy_price = round(shadow_energy_price, 6)
+
         shadow_load_forecast = _read_state_float_or_none(
             self.hass, self._config.get(CONF_ENTITY_SHADOW_LOAD_FORECAST)
         )
@@ -486,16 +498,6 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         )
         shadow_envelope_export = _read_state_float_or_none(
             self.hass, self._config.get(CONF_ENTITY_SHADOW_ENVELOPE_EXPORT)
-        )
-
-        # Aggregate shadow energy price: mean of non-None shadow prices as cross-check
-        shadow_values = [
-            v for v in [shadow_load_forecast, shadow_solar_forecast,
-                        shadow_envelope_import, shadow_envelope_export]
-            if v is not None
-        ]
-        shadow_energy_price: float | None = (
-            round(sum(shadow_values) / len(shadow_values), 6) if shadow_values else None
         )
 
         # Naive baseline: use total_load_kw (subtraction method)

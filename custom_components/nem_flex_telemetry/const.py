@@ -49,6 +49,7 @@ CONF_ENTITY_FLEX_UP = "entity_flex_available_up_kw"
 CONF_ENTITY_FLEX_DOWN = "entity_flex_available_down_kw"
 
 # Shadow price entity config keys
+CONF_ENTITY_SHADOW_ENERGY = "entity_shadow_energy_price"
 CONF_ENTITY_SHADOW_LOAD_FORECAST = "entity_shadow_load_forecast_price"
 CONF_ENTITY_SHADOW_SOLAR_FORECAST = "entity_shadow_solar_forecast_price"
 CONF_ENTITY_SHADOW_ENVELOPE_IMPORT = "entity_shadow_envelope_import_price"
@@ -202,6 +203,17 @@ DEFAULT_HAEO_ENTITIES: dict[str, dict] = {
     # power-user overrides via YAML / options, but are intentionally absent
     # from this auto-discovery dict.
     # Shadow price entities
+    CONF_ENTITY_SHADOW_ENERGY: {
+        "primary": "sensor.switchboard_power_balance_shadow_price",
+        "fallback": [],
+        "attribute": None,
+        "unit_hint": "$/kWh",
+        "notes": (
+            "HAEO LP dual on the whole-of-house energy balance constraint at "
+            "the switchboard. This is the marginal cost of one extra kWh of "
+            "net energy at the meter for the current dispatch interval."
+        ),
+    },
     CONF_ENTITY_SHADOW_LOAD_FORECAST: {
         "primary": "sensor.load_forecast_limit_shadow_price",
         "fallback": [],

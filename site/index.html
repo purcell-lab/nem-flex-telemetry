@@ -258,7 +258,8 @@
       <div class="mb-4">
         <h2 class="text-xl font-semibold text-ink mb-1">Shadow prices</h2>
         <p class="text-sm text-ink/60">
-          Shadow prices reveal the marginal value the optimiser placed on energy and binding constraints.
+          The headline shadow energy price is the LP dual on the switchboard power-balance constraint:
+          the marginal cost of one extra kWh of net energy at the meter for the current dispatch interval.
           Non-zero envelope shadow prices show where the network is actually constraining flex, in dollar terms.
           Units: $/kWh.
         </p>
@@ -266,7 +267,7 @@
 
       <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
         <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
-          <h3 class="text-sm font-semibold text-ink mb-3">Shadow energy price by hour of day ($/kWh)</h3>
+          <h3 class="text-sm font-semibold text-ink mb-3">Switchboard shadow energy price by hour of day ($/kWh)</h3>
           <div id="chart-shadow-by-hour"></div>
         </div>
         <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
