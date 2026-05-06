@@ -73,6 +73,9 @@ jobs:
         # commit. The Pages deploy steps below run inline in this workflow,
         # so we no longer rely on a separate pages.yml that would have been
         # blocked by [skip ci] anyway.
+        # Pull --rebase before push to recover from concurrent commits (e.g.
+        # an HA telemetry push or a manual maintenance push that landed while
+        # the aggregate job was running).
         run: |
           git config user.name "nem-flex-bot"
           git config user.email "nem-flex-bot@users.noreply.github.com"
@@ -81,7 +84,17 @@ jobs:
             echo "No changes to commit."
           else
             git commit -m "chore: update cohort aggregates and site data [skip ci]"
-            git push
+            for i in 1 2 3; do
+              git pull --rebase --autostash origin main || true
+              if git push; then
+                echo "Pushed on attempt $i"
+                exit 0
+              fi
+              echo "Push attempt $i failed, retrying..."
+              sleep 3
+            done
+            echo "All push attempts failed." >&2
+            exit 1
           fi
 
       # ----------------------------------------------------------------
