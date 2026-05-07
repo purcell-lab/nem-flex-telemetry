@@ -97,14 +97,33 @@ SCHEMA_VERSION = "2.0"
 # expose charge/discharge rate entities directly.
 # Configurable per-asset in v0.4 via options flow.
 # ---------------------------------------------------------------------------
-DEFAULT_BATTERY_MAX_CHARGE_KW: float = 5.0
-DEFAULT_BATTERY_MAX_DISCHARGE_KW: float = 5.0
+# Power-rating fallbacks (kW). Used ONLY when the corresponding number.* entity
+# is missing or unavailable - the publisher always prefers the live entity.
+#
+# Topology (Mark Purcell's reference stack):
+#
+#   ┌── PV (20 kWp DC) ──┐
+#   │                     │
+#   │   Hybrid inverter   │
+# Grid (30 kW AC) ─ ─ ─ ─ ┤  (30 kW AC bus)    ├ ── Battery (DC, e.g. 5 kW)
+#                          │                     │
+#                          └── DCEV charger ─────┴── EV1, EV2 (DC, 25 kW shared)
+#                                (DC-DC)
+#
+# All AC-side flow (grid <-> battery, grid <-> EV, PV <-> grid) passes through
+# the SINGLE hybrid inverter. The DCEV charger is a DC-DC converter on the DC
+# bus, NOT a separate AC inverter. So:
+#   * The hybrid inverter is the household-wide AC-side ceiling on flex.
+#   * Battery and DCEV ratings are per-asset DC-side limits (no inverter clip).
+#   * Cohort flex is bounded by min(asset_sum, hybrid_inverter, grid_envelope).
+#
+# Battery fallbacks intentionally match the hybrid inverter rating: if the live
+# battery sensor is missing we don't want a hardcoded 5 kW floor distorting the
+# numbers. The actual battery rating, when published, is whatever number.* says.
+DEFAULT_BATTERY_MAX_CHARGE_KW: float = 30.0
+DEFAULT_BATTERY_MAX_DISCHARGE_KW: float = 30.0
 DEFAULT_EV_MAX_CHARGE_KW: float = 7.4
 DEFAULT_EV_MAX_DISCHARGE_KW: float = 7.4
-
-# Hybrid inverter and DCEV charger fallbacks (kW). Used when the corresponding
-# number.* entity is missing. Sized for Mark Purcell's reference stack:
-# 30 kW hybrid inverter (PV + battery), 25 kW DC bidirectional EV charger.
 DEFAULT_INVERTER_AC_TO_DC_KW: float = 30.0
 DEFAULT_INVERTER_DC_TO_AC_KW: float = 30.0
 DEFAULT_DCEV_AC_TO_DC_KW: float = 25.0

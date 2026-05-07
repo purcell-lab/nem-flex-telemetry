@@ -171,6 +171,9 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # Flex derivation logging gate
         self._flex_derived_logged: bool = False
 
+        # Power-rating health-check logging gate (logged once at first update)
+        self._power_ratings_logged: bool = False
+
         # Context entities discovered at first update
         self._context_entities: dict[str, str | None] = {}
         self._context_discovered: bool = False
@@ -248,22 +251,85 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
     def _read_dcev_dc_to_ac(self) -> float:
         return self._read_number_kw(ENTITY_DCEV_DC_TO_AC, DEFAULT_DCEV_DC_TO_AC_KW)
 
+    def _resolve_number_kw(
+        self, entity_id: str, default_kw: float
+    ) -> tuple[float, bool]:
+        """Read a number.* entity, returning (value_kw, is_live).
+
+        is_live=True means the entity exists and parsed cleanly; is_live=False
+        means we fell back to the compile-time default. Used by the startup
+        health-check log so the user can see at a glance which power-rating
+        sensors resolved live vs fell back to constants.
+        """
+        state = self.hass.states.get(entity_id)
+        if state is not None and state.state not in ("unavailable", "unknown", ""):
+            try:
+                return abs(float(state.state)), True
+            except ValueError:
+                pass
+        return default_kw, False
+
+    def _log_power_rating_health_check(self) -> None:
+        """Log a one-time summary of which power-rating entities are live.
+
+        Emits a single INFO line per power-rating entity at first update,
+        showing whether the value came from the live HA entity or fell back
+        to the compile-time default in const.py.
+        """
+        if self._power_ratings_logged:
+            return
+        checks = (
+            ("battery max charge", ENTITY_BATTERY_MAX_CHARGE,
+             DEFAULT_BATTERY_MAX_CHARGE_KW),
+            ("battery max discharge", ENTITY_BATTERY_MAX_DISCHARGE,
+             DEFAULT_BATTERY_MAX_DISCHARGE_KW),
+            ("hybrid inverter AC->DC", ENTITY_INVERTER_AC_TO_DC,
+             DEFAULT_INVERTER_AC_TO_DC_KW),
+            ("hybrid inverter DC->AC", ENTITY_INVERTER_DC_TO_AC,
+             DEFAULT_INVERTER_DC_TO_AC_KW),
+            ("DCEV charger AC->DC", ENTITY_DCEV_AC_TO_DC,
+             DEFAULT_DCEV_AC_TO_DC_KW),
+            ("DCEV charger DC->AC", ENTITY_DCEV_DC_TO_AC,
+             DEFAULT_DCEV_DC_TO_AC_KW),
+        )
+        live_count = 0
+        fallback_count = 0
+        for label, entity_id, default_kw in checks:
+            value, is_live = self._resolve_number_kw(entity_id, default_kw)
+            if is_live:
+                live_count += 1
+                _LOGGER.info(
+                    "Power-rating health-check: %s -> %.1f kW (live from %s)",
+                    label, value, entity_id,
+                )
+            else:
+                fallback_count += 1
+                _LOGGER.warning(
+                    "Power-rating health-check: %s -> %.1f kW "
+                    "(FALLBACK; %s missing or unavailable)",
+                    label, value, entity_id,
+                )
+        _LOGGER.info(
+            "Power-rating health-check complete: %d live, %d fallback",
+            live_count, fallback_count,
+        )
+        self._power_ratings_logged = True
+
     def _battery_asset_flex(
         self, battery_setpoint_kw: float
     ) -> tuple[float, float]:
-        """Per-asset battery flex headroom, clipped to the hybrid inverter rating.
+        """Per-asset battery flex headroom, raw battery rating only.
 
-        The battery shares a hybrid inverter with the PV array, so its real
-        AC-side limit is min(battery_max_*, inverter_*).
+        Reports the battery's own DC-side limits as published by
+        number.battery_max_charge_power / number.battery_max_discharge_power.
+        The hybrid inverter ceiling is applied at the household level in
+        _build_record, NOT here, because the inverter is shared with PV and
+        DCEV flow paths.
 
         Returns (available_up_kw, available_down_kw), both >= 0.
         """
-        max_charge = min(
-            self._read_battery_max_charge(), self._read_inverter_ac_to_dc()
-        )
-        max_discharge = min(
-            self._read_battery_max_discharge(), self._read_inverter_dc_to_ac()
-        )
+        max_charge = self._read_battery_max_charge()
+        max_discharge = self._read_battery_max_discharge()
         current_charge_rate = max(0.0, battery_setpoint_kw)
         current_discharge_rate = max(0.0, -battery_setpoint_kw)
         return (
@@ -598,11 +664,21 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     "Failed to build asset record for %s: %s", asset_id, exc
                 )
 
-        # Household flex aggregation (schema v2.0):
-        #   flex = sum(asset.available_*) clipped to grid envelope.
-        # If HAEO exposes a flex sensor directly, that takes precedence.
+        # Household flex aggregation (schema v2.0).
+        #
+        # The household has three sequential bottlenecks on flex:
+        #   1. asset_sum         - what the assets can physically deliver/absorb
+        #   2. hybrid inverter   - AC-side ceiling (battery, PV, DCEV all share it)
+        #   3. grid envelope     - DNSP-imposed import/export cap (CSIP-AUS or static)
+        # Cohort flex is the minimum of the three.
+        #
+        # If HAEO exposes a household flex sensor directly, that takes precedence
+        # (it presumably already accounts for these constraints inside HAEO's LP).
         flex_up_entity = self._config.get(CONF_ENTITY_FLEX_UP)
         flex_down_entity = self._config.get(CONF_ENTITY_FLEX_DOWN)
+
+        inverter_ac_to_dc = self._read_inverter_ac_to_dc()
+        inverter_dc_to_ac = self._read_inverter_dc_to_ac()
 
         if flex_up_entity and self.hass.states.get(flex_up_entity) is not None:
             flex_up = max(
@@ -613,7 +689,11 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
             asset_flex_up_sum = sum(
                 a.get("available_up_kw", 0.0) or 0.0 for a in assets
             )
-            flex_up = min(asset_flex_up_sum, envelope_import_limit_kw)
+            flex_up = min(
+                asset_flex_up_sum,
+                inverter_ac_to_dc,
+                envelope_import_limit_kw,
+            )
 
         if flex_down_entity and self.hass.states.get(flex_down_entity) is not None:
             flex_down = max(
@@ -624,7 +704,11 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
             asset_flex_down_sum = sum(
                 a.get("available_down_kw", 0.0) or 0.0 for a in assets
             )
-            flex_down = min(asset_flex_down_sum, envelope_export_limit_kw)
+            flex_down = min(
+                asset_flex_down_sum,
+                inverter_dc_to_ac,
+                envelope_export_limit_kw,
+            )
 
         record: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -687,6 +771,10 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if not self._context_discovered:
             await self._async_discover_context()
             await self._async_run_global_sweep()
+
+        # One-time power-rating health-check (logs which number.* sensors
+        # are live vs falling back to const.py defaults).
+        self._log_power_rating_health_check()
 
         record = self._build_record()
 
