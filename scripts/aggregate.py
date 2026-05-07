@@ -302,19 +302,25 @@ def write_parquet_by_date(df: pd.DataFrame, resolution: str) -> None:
 # ---------------------------------------------------------------------------
 
 def compute_flex_stack(df: pd.DataFrame) -> dict[str, Any]:
-    """Tab 1: Cohort flex stack over time ($/kWh price overlay).
+    """Tab 1: Cohort flex stack over time ($/kWh dual-price overlay).
 
     Cohort flex at time T = sum across households of flex_available_(up|down)_kw
     at that 5-minute interval. Hourly = time-mean of those 5-minute cohort sums
     (NOT a sum across the 12 sub-intervals, which would 12x-inflate the kW).
 
-    Price signal at time T = cohort mean of price_signal_seen, then time-mean
-    over the hour.
+    Two price overlays drive the flex behaviours separately:
+      - buy_price  (price_signal_seen): drives import / flex_up
+      - sell_price (price_export_seen): drives export / flex_down
+    Both are reported as cohort means then time-averaged over the hour.
+
+    'price_signal' is retained for backward compatibility with older clients;
+    it equals buy_price.
     """
     if df.empty:
         return {
             "intervals": [], "flex_up_kw": [], "flex_down_kw": [],
-            "price_signal": [], "price_unit": "$/kWh",
+            "buy_price": [], "sell_price": [], "price_signal": [],
+            "price_unit": "$/kWh",
         }
 
     # Step 1: cohort sum at each 5-minute interval
@@ -323,7 +329,8 @@ def compute_flex_stack(df: pd.DataFrame) -> dict[str, Any]:
         .agg(
             flex_up_kw=("flex_available_up_kw", "sum"),
             flex_down_kw=("flex_available_down_kw", "sum"),
-            price_signal=("price_signal_seen", "mean"),
+            buy_price=("price_signal_seen", "mean"),
+            sell_price=("price_export_seen", "mean"),
         )
         .reset_index()
     )
@@ -336,11 +343,15 @@ def compute_flex_stack(df: pd.DataFrame) -> dict[str, Any]:
         .reset_index()
     )
 
+    buy_price = hourly["buy_price"].round(6).tolist()
+    sell_price = hourly["sell_price"].round(6).tolist()
     return {
         "intervals": hourly["interval_start_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ").tolist(),
         "flex_up_kw": hourly["flex_up_kw"].round(2).tolist(),
         "flex_down_kw": hourly["flex_down_kw"].round(2).tolist(),
-        "price_signal": hourly["price_signal"].round(6).tolist(),
+        "buy_price": buy_price,
+        "sell_price": sell_price,
+        "price_signal": buy_price,  # back-compat alias
         "price_unit": "$/kWh",
     }
 
