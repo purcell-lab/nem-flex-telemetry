@@ -152,12 +152,23 @@ def load_all_jsonl() -> pd.DataFrame:
         _LOG.warning("data/raw/ directory does not exist. Returning empty DataFrame.")
         return pd.DataFrame(columns=REQUIRED_FIELDS)
 
+    # Track aliases that fired this run so we log each remap once (first hit) rather
+    # than per-file. Surfaces unintended aliasing without spamming the log.
+    seen_aliases: set[str] = set()
+
     for jsonl_path in sorted(DATA_RAW.rglob("*.jsonl")):
         raw_household_id = jsonl_path.parts[len(DATA_RAW.parts)]
         # Collapse known publisher-side ID changes for the same physical site so the
         # cohort_size stat reflects unique households, not unique POST URLs. New entries
         # belong here whenever a publisher re-registers under a fresh UUID.
         household_id = HOUSEHOLD_ALIAS.get(raw_household_id, raw_household_id)
+        if household_id != raw_household_id and raw_household_id not in seen_aliases:
+            _LOG.info(
+                "Aliasing household %r -> %r (HOUSEHOLD_ALIAS map)",
+                raw_household_id,
+                household_id,
+            )
+            seen_aliases.add(raw_household_id)
         with jsonl_path.open() as f:
             for line_num, line in enumerate(f, 1):
                 line = line.strip()
@@ -815,10 +826,33 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
         shadow_by_hour["p25_shadow_energy_price"] = [0.0] * 24
         shadow_by_hour["p75_shadow_energy_price"] = [0.0] * 24
 
+    def _pivot_one(col: str) -> tuple[list[str], list[list[float]]]:
+        """Pivot a single shadow-price column into (postcode_prefixes, 24h grid).
+
+        Returns ([], []) if the column is missing so the caller can decide
+        whether to fall back to a zero-filled side.
+        """
+        if col not in df.columns:
+            return [], []
+        series = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        pivot = (
+            series.groupby([df["postcode_prefix"], df["hour"]])
+            .mean()
+            .unstack(fill_value=0.0)
+        )
+        for h in range(24):
+            if h not in pivot.columns:
+                pivot[h] = 0.0
+        pivot = pivot[sorted(pivot.columns)]
+        return pivot.index.tolist(), pivot.round(6).values.tolist()
+
     def _pivot_pair(import_col: str, export_col: str) -> dict[str, Any]:
         """Build a postcode_prefix x hour heatmap pair from two shadow-price columns.
 
         All inputs and outputs are $/kWh; no unit conversion is applied.
+        Each side is built independently: if only one column is present we still
+        publish the available side and warn-log the missing one rather than silently
+        dropping both.
         """
         result: dict[str, Any] = {
             "postcode_prefixes": [],
@@ -828,33 +862,38 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
             "import_source": import_col,
             "export_source": export_col,
         }
-        if import_col not in df.columns or export_col not in df.columns:
+
+        import_missing = import_col not in df.columns
+        export_missing = export_col not in df.columns
+        if import_missing and export_missing:
             return result
+        if import_missing:
+            _LOG.warning(
+                "Shadow heatmap: import column %r missing, publishing export side only",
+                import_col,
+            )
+        if export_missing:
+            _LOG.warning(
+                "Shadow heatmap: export column %r missing, publishing import side only",
+                export_col,
+            )
 
-        df[import_col] = pd.to_numeric(df[import_col], errors="coerce").fillna(0.0)
-        df[export_col] = pd.to_numeric(df[export_col], errors="coerce").fillna(0.0)
+        import_prefixes, import_grid = _pivot_one(import_col)
+        export_prefixes, export_grid = _pivot_one(export_col)
 
-        import_pivot = (
-            df.groupby(["postcode_prefix", "hour"])[import_col]
-            .mean()
-            .unstack(fill_value=0.0)
-        )
-        export_pivot = (
-            df.groupby(["postcode_prefix", "hour"])[export_col]
-            .mean()
-            .unstack(fill_value=0.0)
-        )
-        for h in range(24):
-            if h not in import_pivot.columns:
-                import_pivot[h] = 0.0
-            if h not in export_pivot.columns:
-                export_pivot[h] = 0.0
-        import_pivot = import_pivot[sorted(import_pivot.columns)]
-        export_pivot = export_pivot[sorted(export_pivot.columns)]
+        # Union of prefixes across both sides keeps a row available even when only
+        # one side has data for a given postcode.
+        all_prefixes = sorted(set(import_prefixes) | set(export_prefixes))
+        zero_row = [0.0] * 24
 
-        result["postcode_prefixes"] = import_pivot.index.tolist()
-        result["import_shadow"] = import_pivot.round(6).values.tolist()
-        result["export_shadow"] = export_pivot.round(6).values.tolist()
+        def _row_for(pc: str, prefixes: list[str], grid: list[list[float]]) -> list[float]:
+            if pc in prefixes:
+                return grid[prefixes.index(pc)]
+            return zero_row
+
+        result["postcode_prefixes"] = all_prefixes
+        result["import_shadow"] = [_row_for(pc, import_prefixes, import_grid) for pc in all_prefixes]
+        result["export_shadow"] = [_row_for(pc, export_prefixes, export_grid) for pc in all_prefixes]
         return result
 
     # b) Primary envelope heatmap: HAEO forecast limit shadows (almost always binding)

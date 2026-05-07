@@ -1009,11 +1009,11 @@ function renderV2gDuty(d) {
     color: { domain: states, range: colours, legend: true },
     marks: [
       window.Plot.areaY(data.filter(r => r.state === 'charging'),   { x: 't', y: 'pct', fill: TEAL,   fillOpacity: 0.7, tip: true,
-        title: r => `${fmtAESTDateTime(r.t)}\nCharging: ${r.pct.toFixed(0)}% of EVs` }),
+        title: r => `${fmtAESTDateTime(r.t)}\nCharging: ${r.pct == null ? 'no data' : r.pct.toFixed(0) + '% of EVs'}` }),
       window.Plot.areaY(data.filter(r => r.state === 'discharging'),{ x: 't', y: 'pct', fill: GOLD,   fillOpacity: 0.7, tip: true,
-        title: r => `${fmtAESTDateTime(r.t)}\nDischarging: ${r.pct.toFixed(0)}% of EVs` }),
+        title: r => `${fmtAESTDateTime(r.t)}\nDischarging: ${r.pct == null ? 'no data' : r.pct.toFixed(0) + '% of EVs'}` }),
       window.Plot.areaY(data.filter(r => r.state === 'plugged_idle'),{ x: 't', y: 'pct', fill: '#93C5FD', fillOpacity: 0.5, tip: true,
-        title: r => `${fmtAESTDateTime(r.t)}\nPlugged idle: ${r.pct.toFixed(0)}% of EVs` }),
+        title: r => `${fmtAESTDateTime(r.t)}\nPlugged idle: ${r.pct == null ? 'no data' : r.pct.toFixed(0) + '% of EVs'}` }),
     ]
   });
   el.innerHTML = '';
