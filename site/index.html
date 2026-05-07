@@ -282,7 +282,7 @@
           the marginal cost of one extra kWh of net energy at the meter for the current dispatch interval.
           The envelope heatmaps below populate from HAEO's load and solar forecast-limit shadows,
           which bind almost continuously and reveal where the forecast envelope is shaping dispatch.
-          All values in $/kWh.
+          HAEO publishes shadows in $/kW per 1-minute interval; the dashboard scales by 60 to display $/kWh.
         </p>
       </div>
 
@@ -335,6 +335,18 @@ const GOLD  = '#E8B254';
 const INK   = '#0E1416';
 const PAPER = '#F2EFE7';
 const RED   = '#E05252';
+
+// ---------------------------------------------------------------------------
+// Shadow price unit conversion.
+// HAEO publishes shadow prices as the LP dual on a 1-minute energy balance,
+// i.e. $/kW per 1-minute interval. To present in $/kWh we multiply by 60
+// (60 minutes per hour). Applied at the dashboard boundary so aggregator JSON
+// stays in HAEO's native units; if HAEO ever switches to publishing $/kWh
+// directly, drop this back to 1.
+// ---------------------------------------------------------------------------
+const SHADOW_KW_TO_KWH = 60;
+const toShadowKwh = v => (v == null ? null : v * SHADOW_KW_TO_KWH);
+const scaleShadowGrid = grid => (grid || []).map(row => (row || []).map(toShadowKwh));
 
 // ---------------------------------------------------------------------------
 // Time formatting: all chart times rendered in Australia/Brisbane (AEST, UTC+10).
@@ -1141,11 +1153,21 @@ function renderShadowHeatmap(elId, d, prefixes, labelField) {
 
 function renderShadowPrices(shadowPrices) {
   if (!shadowPrices) return;
-  renderShadowByHour(shadowPrices.shadow_by_hour);
+  // Convert all shadow series from HAEO's native $/kW-minute to $/kWh ( x 60 ).
+  // Done here at the boundary so the underlying chart helpers stay unit-agnostic.
+  const sbh = shadowPrices.shadow_by_hour;
+  const sbhScaled = sbh ? {
+    ...sbh,
+    mean_shadow_energy_price: (sbh.mean_shadow_energy_price || []).map(toShadowKwh),
+    p25_shadow_energy_price:  (sbh.p25_shadow_energy_price  || []).map(toShadowKwh),
+    p75_shadow_energy_price:  (sbh.p75_shadow_energy_price  || []).map(toShadowKwh),
+  } : sbh;
+  renderShadowByHour(sbhScaled);
+
   const hm = shadowPrices.envelope_shadow_heatmap;
   if (hm) {
-    renderShadowHeatmap('chart-shadow-import-heat', hm.import_shadow, hm.postcode_prefixes, 'import');
-    renderShadowHeatmap('chart-shadow-export-heat', hm.export_shadow, hm.postcode_prefixes, 'export');
+    renderShadowHeatmap('chart-shadow-import-heat', scaleShadowGrid(hm.import_shadow), hm.postcode_prefixes, 'import');
+    renderShadowHeatmap('chart-shadow-export-heat', scaleShadowGrid(hm.export_shadow), hm.postcode_prefixes, 'export');
   }
 }
 
