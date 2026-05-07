@@ -509,24 +509,25 @@ function renderFlexStack(d) {
   const times = d.intervals.map(s => new Date(s));
   const upData   = times.map((t, i) => ({ t, v: d.flex_up_kw[i],   label: 'Flex up' }));
   const downData = times.map((t, i) => ({ t, v: d.flex_down_kw[i], label: 'Flex down' }));
-  const priceRaw = times.map((t, i) => ({ t, p: d.price_signal[i] }));
+  // Dual price overlays: buy drives flex_up (import), sell drives flex_down (export).
+  // Fall back to legacy price_signal if buy/sell not present (older deploys).
+  const buyArr  = d.buy_price  || d.price_signal || times.map(_ => null);
+  const sellArr = d.sell_price || times.map(_ => null);
+  const buyRaw  = times.map((t, i) => ({ t, p: buyArr[i]  ?? null }));
+  const sellRaw = times.map((t, i) => ({ t, p: sellArr[i] ?? null }));
 
   // Compute kW range and price range for dual-axis scaling.
   const kwMaxUp   = Math.max(0, ...upData.map(r => r.v ?? 0));
   const kwMaxDown = Math.max(0, ...downData.map(r => r.v ?? 0));
   const kwMax     = Math.max(kwMaxUp, kwMaxDown, 1);
-  const priceVals = priceRaw.map(r => r.p).filter(v => v != null && Number.isFinite(v));
-  const priceMin  = priceVals.length ? Math.min(0, ...priceVals) : 0;
-  const priceMax  = priceVals.length ? Math.max(...priceVals)    : 1;
+  const allPrices = [...buyRaw, ...sellRaw].map(r => r.p).filter(v => v != null && Number.isFinite(v));
+  const priceMin  = allPrices.length ? Math.min(0, ...allPrices) : 0;
+  const priceMax  = allPrices.length ? Math.max(...allPrices)    : 1;
   const priceRange = Math.max(priceMax - priceMin, 0.01);
-  // Map price -> kW domain so the gold line is visible alongside flex areas.
+  // Map price -> kW domain so the price lines are visible alongside flex areas.
   const priceToKw = p => ((p - priceMin) / priceRange) * kwMax;
-  const kwToPrice = k => (k / kwMax) * priceRange + priceMin;
-  const priceData = priceRaw.map(r => ({
-    t: r.t,
-    v: r.p == null ? null : priceToKw(r.p),
-    p: r.p,
-  }));
+  const buyData  = buyRaw.map(r  => ({ t: r.t, v: r.p == null ? null : priceToKw(r.p), p: r.p }));
+  const sellData = sellRaw.map(r => ({ t: r.t, v: r.p == null ? null : priceToKw(r.p), p: r.p }));
 
   // Right-side ticks for the price axis: 5 evenly-spaced ticks across the price range.
   const priceTicks = [];
@@ -535,13 +536,18 @@ function renderFlexStack(d) {
     priceTicks.push({ p, kw: priceToKw(p) });
   }
 
+  const lastTime = times[times.length - 1] || new Date();
   const plot = window.Plot.plot({
     width: el.parentElement.clientWidth - 32,
     height: 360,
-    marginRight: 70,
+    marginRight: 80,
     x: { type: 'utc', label: 'Time (AEST)', tickFormat: tickAEST },
-    y: { label: 'kW (cohort total)', grid: true, domain: [0, kwMax * 1.05] },
-    color: { domain: ['Flex up', 'Flex down', 'Price'], range: [TEAL, RUST, GOLD], legend: true },
+    y: { label: 'kW (cohort total)        Right: price ($/kWh)', grid: true, domain: [0, kwMax * 1.05] },
+    color: {
+      domain: ['Flex up', 'Flex down', 'Buy price', 'Sell price'],
+      range:  [TEAL,      RUST,        GOLD,        '#8C6A3F'],
+      legend: true,
+    },
     marks: [
       window.Plot.areaY(upData,   { x: 't', y: 'v', fill: TEAL,  fillOpacity: 0.35, tip: true,
         title: r => r.v == null ? 'no data' : `${fmtAESTDateTime(r.t)}\nFlex up: ${r.v.toFixed(1)} kW` }),
@@ -549,29 +555,31 @@ function renderFlexStack(d) {
       window.Plot.areaY(downData, { x: 't', y: 'v', fill: RUST,  fillOpacity: 0.25, tip: true,
         title: r => r.v == null ? 'no data' : `${fmtAESTDateTime(r.t)}\nFlex down: ${r.v.toFixed(1)} kW` }),
       window.Plot.lineY(downData, { x: 't', y: 'v', stroke: RUST,  strokeWidth: 2 }),
-      // Price line on the kW axis (rescaled), tooltip shows real $/kWh.
-      window.Plot.lineY(priceData.filter(r => r.v != null), {
+      // Buy price drives flex_up (import behaviour).
+      window.Plot.lineY(buyData.filter(r => r.v != null), {
         x: 't', y: 'v',
         stroke: GOLD, strokeWidth: 2.5, strokeDasharray: '5 3',
         tip: true,
-        title: r => `${fmtAESTDateTime(r.t)}\nPrice: $${r.p.toFixed(4)}/kWh`,
+        title: r => `${fmtAESTDateTime(r.t)}\nBuy price: $${r.p.toFixed(4)}/kWh`,
+      }),
+      // Sell price drives flex_down (export behaviour).
+      window.Plot.lineY(sellData.filter(r => r.v != null), {
+        x: 't', y: 'v',
+        stroke: '#8C6A3F', strokeWidth: 2.5, strokeDasharray: '2 3',
+        tip: true,
+        title: r => `${fmtAESTDateTime(r.t)}\nSell price: $${r.p.toFixed(4)}/kWh`,
       }),
       // Right-side price-axis ticks and labels.
       window.Plot.text(priceTicks, {
-        x: () => times[times.length - 1] || new Date(),
+        x: () => lastTime,
         y: 'kw',
         text: r => `$${r.p.toFixed(2)}`,
-        textAnchor: 'start', dx: 8, fill: GOLD, fontSize: 11,
+        textAnchor: 'start', dx: 8, fill: '#6E5733', fontSize: 11,
       }),
     ]
   });
   el.innerHTML = '';
   el.appendChild(plot);
-  // Right-axis label (manually positioned, since Plot has one y-scale per panel).
-  const lbl = document.createElement('div');
-  lbl.className = 'text-xs text-ink/60 mt-1 text-right pr-2';
-  lbl.textContent = `Right axis: price ($/kWh)  \u2014  Brisbane time, AEST`;
-  el.appendChild(lbl);
 }
 
 // ---------------------------------------------------------------------------
