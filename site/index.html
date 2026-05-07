@@ -280,8 +280,9 @@
         <p class="text-sm text-ink/60">
           The headline shadow energy price is the LP dual on the switchboard power-balance constraint:
           the marginal cost of one extra kWh of net energy at the meter for the current dispatch interval.
-          Non-zero envelope shadow prices show where the network is actually constraining flex, in dollar terms.
-          Units: $/kWh.
+          The envelope heatmaps below populate from HAEO's load and solar forecast-limit shadows,
+          which bind almost continuously and reveal where the forecast envelope is shaping dispatch.
+          All values in $/kWh.
         </p>
       </div>
 
@@ -291,14 +292,15 @@
           <div id="chart-shadow-by-hour"></div>
         </div>
         <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
-          <h3 class="text-sm font-semibold text-ink mb-3">Envelope shadow: import binding by postcode prefix and hour</h3>
+          <h3 class="text-sm font-semibold text-ink mb-3">Load forecast envelope shadow by postcode prefix and hour ($/kWh)</h3>
+          <p class="text-xs text-ink/50 mb-3">LP dual on HAEO's load forecast limit. Positive = extra kWh of load increases system cost; negative = relaxing the cap would save money.</p>
           <div id="chart-shadow-import-heat"></div>
         </div>
       </div>
 
       <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
-        <h3 class="text-sm font-semibold text-ink mb-3">Envelope shadow: export binding by postcode prefix and hour</h3>
-        <p class="text-xs text-ink/50 mb-3">Non-zero cells show hours when the export envelope was actually constraining solar dispatch, in $/kWh.</p>
+        <h3 class="text-sm font-semibold text-ink mb-3">Solar forecast envelope shadow by postcode prefix and hour ($/kWh)</h3>
+        <p class="text-xs text-ink/50 mb-3">LP dual on HAEO's solar forecast limit. Positive = extra solar would earn revenue; negative = export envelope is biting and curtailing dispatch.</p>
         <div id="chart-shadow-export-heat"></div>
       </div>
     </section>
@@ -1097,11 +1099,16 @@ function renderShadowHeatmap(elId, d, prefixes, labelField) {
     return;
   }
   const data = [];
+  let absMax = 0;
   prefixes.forEach((pc, pi) => {
     for (let h = 0; h < 24; h++) {
-      data.push({ postcode: pc, hour: h, hour_aest: utcHourToAEST(h), shadow: (d[pi] && d[pi][h]) || 0 });
+      const v = (d[pi] && d[pi][h] != null) ? d[pi][h] : 0;
+      data.push({ postcode: pc, hour: h, hour_aest: utcHourToAEST(h), shadow: v });
+      if (Math.abs(v) > absMax) absMax = Math.abs(v);
     }
   });
+  // Symmetric diverging scale; floor at $0.001/kWh so an empty grid still legends sensibly.
+  const scaleMax = Math.max(absMax, 0.001);
   const plot = window.Plot.plot({
     width: el.parentElement.clientWidth - 32,
     height: Math.max(100, prefixes.length * 36 + 60),
@@ -1109,11 +1116,13 @@ function renderShadowHeatmap(elId, d, prefixes, labelField) {
     x: { label: 'Hour of day (AEST)', domain: Array.from({length: 24}, (_, i) => i), ticks: [0,3,6,9,12,15,18,21], tickFormat: h => `${h}:00` },
     y: { label: 'Postcode prefix', domain: prefixes },
     color: {
-      type: 'sequential',
-      scheme: 'YlOrRd',
-      domain: [0, 0.05],
+      type: 'diverging',
+      scheme: 'RdBu',
+      domain: [-scaleMax, 0, scaleMax],
+      reverse: true,
       label: 'Shadow price ($/kWh)',
       legend: true,
+      tickFormat: '.4f',
     },
     marks: [
       window.Plot.cell(data, {
@@ -1122,7 +1131,7 @@ function renderShadowHeatmap(elId, d, prefixes, labelField) {
         tip: true,
         title: r => r.shadow == null
           ? `${r.postcode} at ${r.hour_aest}:00 AEST: n/a`
-          : `${r.postcode} at ${r.hour_aest}:00 AEST: $${r.shadow.toFixed(4)}/kWh`,
+          : `${r.postcode} at ${r.hour_aest}:00 AEST: $${r.shadow.toFixed(5)}/kWh`,
       }),
     ]
   });

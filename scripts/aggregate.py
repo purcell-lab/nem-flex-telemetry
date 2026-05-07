@@ -746,12 +746,15 @@ def compute_assets_summary(
 def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
     """Tab 7: Shadow prices.
 
-    Two views:
+    Two views (all values in $/kWh):
     a) Shadow price distribution: mean shadow_energy_price by hour-of-day (violin proxy)
     b) Envelope shadow heatmap: postcode_prefix x hour grid of binding envelope shadow prices
 
-    Non-zero envelope shadow prices show where the network is actually constraining flex
-    in dollar terms.
+    The envelope heatmaps are populated from HAEO's load and solar forecast-limit
+    shadow prices, which bind almost continuously and reflect where the forecast
+    envelope is actually constraining net import (load side) or net export (solar
+    side). The grid_max_import/export_power shadows are also published as separate
+    fields for completeness but are rarely non-zero on Mark's 30 kW envelope.
 
     Returns site/data/shadow_prices.json.
     """
@@ -767,14 +770,25 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
             "hours": list(range(24)),
             "import_shadow": [],
             "export_shadow": [],
+            "import_source": "shadow_load_forecast_price",
+            "export_source": "shadow_solar_forecast_price",
+        },
+        "grid_envelope_shadow_heatmap": {
+            "postcode_prefixes": [],
+            "hours": list(range(24)),
+            "import_shadow": [],
+            "export_shadow": [],
+            "import_source": "shadow_envelope_import_price",
+            "export_source": "shadow_envelope_export_price",
         },
         "price_unit": "$/kWh",
         "explainer": (
             "Shadow energy price is the LP dual on the switchboard power-balance "
             "constraint: the marginal cost of one extra kWh of net energy at the "
             "meter for the current dispatch interval. Envelope shadow prices show "
-            "where the import or export limit is actually constraining flex, in "
-            "dollar terms."
+            "where HAEO's forecast envelope is actually constraining flex, in "
+            "dollar terms. Import side draws on the load forecast limit; export "
+            "side draws on the solar forecast limit."
         ),
     }
 
@@ -784,7 +798,7 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
     df = df.copy()
     df["hour"] = df["interval_start_utc"].dt.hour
 
-    # a) Shadow energy price distribution by hour
+    # a) Shadow energy price distribution by hour (all $/kWh)
     shadow_by_hour: dict[str, Any] = {"hours": list(range(24))}
     shadow_col = "shadow_energy_price"
     if shadow_col in df.columns and df[shadow_col].notna().any():
@@ -801,18 +815,22 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
         shadow_by_hour["p25_shadow_energy_price"] = [0.0] * 24
         shadow_by_hour["p75_shadow_energy_price"] = [0.0] * 24
 
-    # b) Envelope shadow heatmap
-    import_col = "shadow_envelope_import_price"
-    export_col = "shadow_envelope_export_price"
+    def _pivot_pair(import_col: str, export_col: str) -> dict[str, Any]:
+        """Build a postcode_prefix x hour heatmap pair from two shadow-price columns.
 
-    heatmap: dict[str, Any] = {
-        "postcode_prefixes": [],
-        "hours": list(range(24)),
-        "import_shadow": [],
-        "export_shadow": [],
-    }
+        All inputs and outputs are $/kWh; no unit conversion is applied.
+        """
+        result: dict[str, Any] = {
+            "postcode_prefixes": [],
+            "hours": list(range(24)),
+            "import_shadow": [],
+            "export_shadow": [],
+            "import_source": import_col,
+            "export_source": export_col,
+        }
+        if import_col not in df.columns or export_col not in df.columns:
+            return result
 
-    if import_col in df.columns and export_col in df.columns:
         df[import_col] = pd.to_numeric(df[import_col], errors="coerce").fillna(0.0)
         df[export_col] = pd.to_numeric(df[export_col], errors="coerce").fillna(0.0)
 
@@ -826,8 +844,6 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
             .mean()
             .unstack(fill_value=0.0)
         )
-
-        # Align columns to all 24 hours
         for h in range(24):
             if h not in import_pivot.columns:
                 import_pivot[h] = 0.0
@@ -836,21 +852,35 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
         import_pivot = import_pivot[sorted(import_pivot.columns)]
         export_pivot = export_pivot[sorted(export_pivot.columns)]
 
-        prefixes = import_pivot.index.tolist()
-        heatmap["postcode_prefixes"] = prefixes
-        heatmap["import_shadow"] = import_pivot.round(6).values.tolist()
-        heatmap["export_shadow"] = export_pivot.round(6).values.tolist()
+        result["postcode_prefixes"] = import_pivot.index.tolist()
+        result["import_shadow"] = import_pivot.round(6).values.tolist()
+        result["export_shadow"] = export_pivot.round(6).values.tolist()
+        return result
+
+    # b) Primary envelope heatmap: HAEO forecast limit shadows (almost always binding)
+    forecast_heatmap = _pivot_pair(
+        "shadow_load_forecast_price",
+        "shadow_solar_forecast_price",
+    )
+
+    # c) Secondary heatmap: grid envelope shadows (rare on a 30 kW envelope)
+    grid_envelope_heatmap = _pivot_pair(
+        "shadow_envelope_import_price",
+        "shadow_envelope_export_price",
+    )
 
     return {
         "shadow_by_hour": shadow_by_hour,
-        "envelope_shadow_heatmap": heatmap,
+        "envelope_shadow_heatmap": forecast_heatmap,
+        "grid_envelope_shadow_heatmap": grid_envelope_heatmap,
         "price_unit": "$/kWh",
         "explainer": (
             "Shadow energy price is the LP dual on the switchboard power-balance "
             "constraint: the marginal cost of one extra kWh of net energy at the "
             "meter for the current dispatch interval. Envelope shadow prices show "
-            "where the import or export limit is actually constraining flex, in "
-            "dollar terms."
+            "where HAEO's forecast envelope is actually constraining flex, in "
+            "dollar terms. Import side draws on the load forecast limit; export "
+            "side draws on the solar forecast limit."
         ),
     }
 
