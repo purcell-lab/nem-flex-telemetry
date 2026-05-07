@@ -102,9 +102,23 @@ DEFAULT_BATTERY_MAX_DISCHARGE_KW: float = 5.0
 DEFAULT_EV_MAX_CHARGE_KW: float = 7.4
 DEFAULT_EV_MAX_DISCHARGE_KW: float = 7.4
 
-# Entity IDs for battery max rate sensors (if available)
-ENTITY_BATTERY_MAX_CHARGE = "sensor.battery_max_charge_power"
-ENTITY_BATTERY_MAX_DISCHARGE = "sensor.battery_max_discharge_power"
+# Hybrid inverter and DCEV charger fallbacks (kW). Used when the corresponding
+# number.* entity is missing. Sized for Mark Purcell's reference stack:
+# 30 kW hybrid inverter (PV + battery), 25 kW DC bidirectional EV charger.
+DEFAULT_INVERTER_AC_TO_DC_KW: float = 30.0
+DEFAULT_INVERTER_DC_TO_AC_KW: float = 30.0
+DEFAULT_DCEV_AC_TO_DC_KW: float = 25.0
+DEFAULT_DCEV_DC_TO_AC_KW: float = 25.0
+
+# Entity IDs for power-rating number entities. The publisher reads each on every
+# 5-minute push; missing/unavailable entities fall back to the DEFAULT_* above.
+# Domain is `number.` (user-writable) per HAEO/EMHASS convention.
+ENTITY_BATTERY_MAX_CHARGE = "number.battery_max_charge_power"
+ENTITY_BATTERY_MAX_DISCHARGE = "number.battery_max_discharge_power"
+ENTITY_INVERTER_AC_TO_DC = "number.inverter_max_ac_to_dc_power"
+ENTITY_INVERTER_DC_TO_AC = "number.inverter_max_dc_to_ac_power"
+ENTITY_DCEV_AC_TO_DC = "number.dcev_inverter_max_ac_to_dc_power"
+ENTITY_DCEV_DC_TO_AC = "number.dcev_inverter_max_dc_to_ac_power"
 
 # ---------------------------------------------------------------------------
 # GLOBAL_SWEEP_PATTERNS

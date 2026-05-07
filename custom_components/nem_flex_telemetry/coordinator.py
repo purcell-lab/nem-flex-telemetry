@@ -56,11 +56,19 @@ from .const import (
     CONF_TOKEN,
     DEFAULT_BATTERY_MAX_CHARGE_KW,
     DEFAULT_BATTERY_MAX_DISCHARGE_KW,
+    DEFAULT_DCEV_AC_TO_DC_KW,
+    DEFAULT_DCEV_DC_TO_AC_KW,
     DEFAULT_EV_MAX_CHARGE_KW,
     DEFAULT_EV_MAX_DISCHARGE_KW,
+    DEFAULT_INVERTER_AC_TO_DC_KW,
+    DEFAULT_INVERTER_DC_TO_AC_KW,
     DOMAIN,
     ENTITY_BATTERY_MAX_CHARGE,
     ENTITY_BATTERY_MAX_DISCHARGE,
+    ENTITY_DCEV_AC_TO_DC,
+    ENTITY_DCEV_DC_TO_AC,
+    ENTITY_INVERTER_AC_TO_DC,
+    ENTITY_INVERTER_DC_TO_AC,
     GITHUB_REPO,
     RECORDS_PER_PUSH,
     SCHEMA_VERSION,
@@ -201,50 +209,137 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
             )
         return self._github_client
 
-    def _read_battery_max_charge(self) -> float:
-        """Read battery max charge rate, falling back to the configured default."""
-        state = self.hass.states.get(ENTITY_BATTERY_MAX_CHARGE)
+    def _read_number_kw(self, entity_id: str, default_kw: float) -> float:
+        """Read a number.* power-rating entity in kW, with default fallback.
+
+        Used for battery / inverter / DCEV charger power ratings.
+        """
+        state = self.hass.states.get(entity_id)
         if state is not None and state.state not in ("unavailable", "unknown", ""):
             try:
-                return float(state.state)
+                return abs(float(state.state))
             except ValueError:
                 pass
-        return DEFAULT_BATTERY_MAX_CHARGE_KW
+        return default_kw
+
+    def _read_battery_max_charge(self) -> float:
+        return self._read_number_kw(
+            ENTITY_BATTERY_MAX_CHARGE, DEFAULT_BATTERY_MAX_CHARGE_KW
+        )
 
     def _read_battery_max_discharge(self) -> float:
-        """Read battery max discharge rate, falling back to the configured default."""
-        state = self.hass.states.get(ENTITY_BATTERY_MAX_DISCHARGE)
-        if state is not None and state.state not in ("unavailable", "unknown", ""):
-            try:
-                return float(state.state)
-            except ValueError:
-                pass
-        return DEFAULT_BATTERY_MAX_DISCHARGE_KW
+        return self._read_number_kw(
+            ENTITY_BATTERY_MAX_DISCHARGE, DEFAULT_BATTERY_MAX_DISCHARGE_KW
+        )
+
+    def _read_inverter_ac_to_dc(self) -> float:
+        return self._read_number_kw(
+            ENTITY_INVERTER_AC_TO_DC, DEFAULT_INVERTER_AC_TO_DC_KW
+        )
+
+    def _read_inverter_dc_to_ac(self) -> float:
+        return self._read_number_kw(
+            ENTITY_INVERTER_DC_TO_AC, DEFAULT_INVERTER_DC_TO_AC_KW
+        )
+
+    def _read_dcev_ac_to_dc(self) -> float:
+        return self._read_number_kw(ENTITY_DCEV_AC_TO_DC, DEFAULT_DCEV_AC_TO_DC_KW)
+
+    def _read_dcev_dc_to_ac(self) -> float:
+        return self._read_number_kw(ENTITY_DCEV_DC_TO_AC, DEFAULT_DCEV_DC_TO_AC_KW)
+
+    def _battery_asset_flex(
+        self, battery_setpoint_kw: float
+    ) -> tuple[float, float]:
+        """Per-asset battery flex headroom, clipped to the hybrid inverter rating.
+
+        The battery shares a hybrid inverter with the PV array, so its real
+        AC-side limit is min(battery_max_*, inverter_*).
+
+        Returns (available_up_kw, available_down_kw), both >= 0.
+        """
+        max_charge = min(
+            self._read_battery_max_charge(), self._read_inverter_ac_to_dc()
+        )
+        max_discharge = min(
+            self._read_battery_max_discharge(), self._read_inverter_dc_to_ac()
+        )
+        current_charge_rate = max(0.0, battery_setpoint_kw)
+        current_discharge_rate = max(0.0, -battery_setpoint_kw)
+        return (
+            max(0.0, max_charge - current_charge_rate),
+            max(0.0, max_discharge - current_discharge_rate),
+        )
+
+    def _ev_asset_flex(
+        self,
+        asset_id: str,
+        ev_setpoint_kw: float,
+        connection_state: str,
+        power_flow_capability: str,
+    ) -> tuple[float, float]:
+        """Per-asset EV flex headroom, gated by DCEV charger allocation.
+
+        Allocation rule: the household has ONE DCEV bidirectional charger shared
+        across both EVs. Only the EV currently allocated the charger contributes
+        flex; the other gets (0, 0). Allocation rule (sticky):
+          - If self._last_bidirectional_ev_id is set and matches asset_id, this
+            EV holds the charger.
+          - Else the first plugged EV in iteration order wins. _build_record
+            iterates ASSET_DEFAULTS deterministically so this is stable.
+
+        Connection state gating:
+          - 'unplugged' / 'driving' -> (0, 0): EV not present.
+          - 'charge_only' -> available_down = 0 (no V2G).
+          - 'bidirectional' -> both directions available.
+          - 'plugged_idle' / 'charging' / 'discharging' -> use
+            power_flow_capability to decide if down is available.
+
+        Returns (available_up_kw, available_down_kw), both >= 0.
+        """
+        if connection_state in ("unplugged", "driving"):
+            return 0.0, 0.0
+
+        # DCEV allocation: only the sticky owner gets the charger.
+        if (
+            self._last_bidirectional_ev_id is not None
+            and self._last_bidirectional_ev_id != asset_id
+        ):
+            return 0.0, 0.0
+        if self._last_bidirectional_ev_id is None:
+            # No sticky owner yet. Claim it for the first plugged EV.
+            self._last_bidirectional_ev_id = asset_id
+
+        max_charge = self._read_dcev_ac_to_dc()
+        max_discharge = self._read_dcev_dc_to_ac()
+
+        current_charge_rate = max(0.0, ev_setpoint_kw)
+        current_discharge_rate = max(0.0, -ev_setpoint_kw)
+
+        available_up = max(0.0, max_charge - current_charge_rate)
+        if power_flow_capability == "bidirectional":
+            available_down = max(0.0, max_discharge - current_discharge_rate)
+        else:
+            # charge_only or none: V2G not available, but charge headroom is.
+            available_down = 0.0
+
+        return available_up, available_down
 
     def _derive_flex_headroom(self, battery_setpoint_kw: float) -> tuple[float, float]:
-        """Derive flex_available_up/down from battery limits.
+        """Battery-only flex headroom (legacy fallback path).
 
-        flex_up  = max_charge  - max(0, battery_active_power)
-        flex_down = max_discharge - max(0, -battery_active_power)
-
-        Returns (flex_up_kw, flex_down_kw), both >= 0.
+        Used only when ``_build_record`` cannot aggregate per-asset flex (e.g.
+        if asset records were not built this interval). Cohort flex is normally
+        computed from the per-asset sum in ``_build_record`` itself.
         """
         if not self._flex_derived_logged:
             _LOGGER.info(
-                "flex_available_up/down derived from battery limits since HAEO does not "
-                "expose them directly."
+                "flex_available_up/down derived per-asset (battery + DCEV-allocated EVs) "
+                "clipped to grid envelope. See _build_record for the sum-and-clip path."
             )
             self._flex_derived_logged = True
 
-        max_charge = self._read_battery_max_charge()
-        max_discharge = self._read_battery_max_discharge()
-
-        current_charge_rate = max(0.0, battery_setpoint_kw)
-        current_discharge_rate = max(0.0, -battery_setpoint_kw)
-
-        flex_up = max(0.0, max_charge - current_charge_rate)
-        flex_down = max(0.0, max_discharge - current_discharge_rate)
-        return flex_up, flex_down
+        return self._battery_asset_flex(battery_setpoint_kw)
 
     def _infer_ev_connection_state(
         self,
@@ -362,18 +457,30 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         soc_pct = _read_state_float(self.hass, soc_entity, fallback=0.0) or 0.0
         setpoint_kw = _read_state_float_or_none(self.hass, setpoint_entity)
         shadow = _read_state_float_or_none(self.hass, shadow_entity)
+        sp = setpoint_kw if setpoint_kw is not None else 0.0
 
-        # Derive per-asset flex headroom
+        # Derive per-asset flex headroom.
+        # - Battery: clipped to hybrid inverter rating (PV + battery share AC side).
+        # - EV: gated by DCEV charger allocation (one charger, two EVs) and
+        #   connection_state. Must compute connection_state first.
+        connection_state: str | None = None
+        power_flow_capability: str | None = None
+
         if kind == "stationary_battery":
-            max_charge = self._read_battery_max_charge()
-            max_discharge = self._read_battery_max_discharge()
+            available_up, available_down = self._battery_asset_flex(sp)
+        elif kind == "ev":
+            connection_state, power_flow_capability = self._infer_ev_connection_state(
+                asset_id, shadow, setpoint_kw, soc_pct, now
+            )
+            available_up, available_down = self._ev_asset_flex(
+                asset_id, sp, connection_state, power_flow_capability
+            )
         else:
+            # Unknown asset kind: fall back to spec-declared limits, no clip.
             max_charge = asset_spec.get("max_charge_kw", DEFAULT_EV_MAX_CHARGE_KW)
             max_discharge = asset_spec.get("max_discharge_kw", DEFAULT_EV_MAX_DISCHARGE_KW)
-
-        sp = setpoint_kw if setpoint_kw is not None else 0.0
-        available_up = max(0.0, max_charge - max(0.0, sp))
-        available_down = max(0.0, max_discharge - max(0.0, -sp))
+            available_up = max(0.0, max_charge - max(0.0, sp))
+            available_down = max(0.0, max_discharge - max(0.0, -sp))
 
         record: dict[str, Any] = {
             "asset_id": asset_id,
@@ -389,9 +496,6 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         # EV-specific fields
         if kind == "ev":
-            connection_state, power_flow_capability = self._infer_ev_connection_state(
-                asset_id, shadow, setpoint_kw, soc_pct, now
-            )
             record["connection_state"] = connection_state
             record["power_flow_capability"] = power_flow_capability
             record["departure_target_pct"] = None
@@ -452,29 +556,6 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
             ) or 5.0
         )
 
-        # Flex headroom
-        flex_up_entity = self._config.get(CONF_ENTITY_FLEX_UP)
-        flex_down_entity = self._config.get(CONF_ENTITY_FLEX_DOWN)
-
-        # Use home_battery setpoint to derive headroom if HAEO doesn't expose flex directly
-        battery_setpoint = 0.0
-        home_battery_spec = ASSET_DEFAULTS.get("home_battery", {})
-        batt_setpoint_entity = home_battery_spec.get("setpoint_entity")
-        if batt_setpoint_entity:
-            battery_setpoint = _read_state_float(
-                self.hass, batt_setpoint_entity, fallback=0.0
-            ) or 0.0
-
-        if flex_up_entity and self.hass.states.get(flex_up_entity) is not None:
-            flex_up = max(0.0, _read_state_float(self.hass, flex_up_entity, fallback=0.0) or 0.0)
-        else:
-            flex_up, _ = self._derive_flex_headroom(battery_setpoint)
-
-        if flex_down_entity and self.hass.states.get(flex_down_entity) is not None:
-            flex_down = max(0.0, _read_state_float(self.hass, flex_down_entity, fallback=0.0) or 0.0)
-        else:
-            _, flex_down = self._derive_flex_headroom(battery_setpoint)
-
         # Shadow prices (all nullable, all in $/kWh).
         #
         # shadow_energy_price is the headline switchboard power-balance dual,
@@ -505,7 +586,8 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         naive_baseline_kw = total_load_kw
         naive_baseline_method = "subtraction"
 
-        # Build asset records
+        # Build asset records first: per-asset flex computation depends on
+        # connection_state inference and DCEV sticky allocation.
         assets: list[dict[str, Any]] = []
         for asset_id, asset_spec in ASSET_DEFAULTS.items():
             try:
@@ -515,6 +597,34 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 _LOGGER.warning(
                     "Failed to build asset record for %s: %s", asset_id, exc
                 )
+
+        # Household flex aggregation (schema v2.0):
+        #   flex = sum(asset.available_*) clipped to grid envelope.
+        # If HAEO exposes a flex sensor directly, that takes precedence.
+        flex_up_entity = self._config.get(CONF_ENTITY_FLEX_UP)
+        flex_down_entity = self._config.get(CONF_ENTITY_FLEX_DOWN)
+
+        if flex_up_entity and self.hass.states.get(flex_up_entity) is not None:
+            flex_up = max(
+                0.0,
+                _read_state_float(self.hass, flex_up_entity, fallback=0.0) or 0.0,
+            )
+        else:
+            asset_flex_up_sum = sum(
+                a.get("available_up_kw", 0.0) or 0.0 for a in assets
+            )
+            flex_up = min(asset_flex_up_sum, envelope_import_limit_kw)
+
+        if flex_down_entity and self.hass.states.get(flex_down_entity) is not None:
+            flex_down = max(
+                0.0,
+                _read_state_float(self.hass, flex_down_entity, fallback=0.0) or 0.0,
+            )
+        else:
+            asset_flex_down_sum = sum(
+                a.get("available_down_kw", 0.0) or 0.0 for a in assets
+            )
+            flex_down = min(asset_flex_down_sum, envelope_export_limit_kw)
 
         record: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
