@@ -24,12 +24,12 @@ jobs:
 
     steps:
       - name: Checkout PR branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -101,7 +101,7 @@ jobs:
 
       - name: Post path-scope violation comment to PR
         if: failure() && steps.path_scope.outcome == 'failure' && github.event_name == 'pull_request'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             github.rest.issues.createComment({
@@ -297,7 +297,7 @@ jobs:
 
       - name: Post validation summary to PR
         if: always() && github.event_name == 'pull_request'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const pathOutcome   = '${{ steps.path_scope.outcome }}';

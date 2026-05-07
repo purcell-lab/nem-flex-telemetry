@@ -28,26 +28,26 @@ jobs:
     name: Aggregate and publish cohort data
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Required by actions/deploy-pages@v4 for the inline Pages deploy below.
+    # Required by actions/deploy-pages@v5 for the inline Pages deploy below.
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: main
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Cache pip dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-aggregate-${{ hashFiles('scripts/requirements-aggregate.txt') }}
@@ -109,13 +109,13 @@ jobs:
       # aggregate without re-introducing recursion risk.
       # ----------------------------------------------------------------
       - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload site artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v4
         with:
           path: site/
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
