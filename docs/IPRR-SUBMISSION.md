@@ -28,7 +28,7 @@ The schema is now at v2.0 (integration v0.3.0), with 18 flat top-level fields, a
 
 3. **Envelope constraints:** `envelope_import_limit_kw` and `envelope_export_limit_kw`. Project Edith (Ausgrid, Dec 2025, p.14) identifies the absence of this data as a critical gap in locational DER planning. This schema collects it at scale.
 
-4. **Counterfactual baseline:** `naive_baseline_kw` with `naive_baseline_method` specifying how it was derived. The counterfactual formula is asymmetric: `(naive_baseline_kw - net_import_kw) * effective_price_kwh * (interval_seconds / 3600)`, where `effective_price_kwh` selects the correct buy or sell price based on the direction of power flow. This makes demand response auditable by any third party.
+4. **Counterfactual baseline:** `naive_baseline_kw` with `naive_baseline_method` specifying how it was derived. The counterfactual formula is asymmetric: `(naive_baseline_kw - net_import_kw) * effective_price_kwh * (interval_seconds / 3600)`, where `effective_price_kwh` selects the correct buy or sell price based on the direction of power flow. This makes demand flexibility auditable by any third party.
 
 **Shadow pricing: the unique-value field**
 
@@ -56,7 +56,7 @@ The HLIA (v1.1, s.3.2) notes that AEMO intends to publish aggregated demand-side
 
 Schema v2.0 introduces an `assets[]` array with per-asset records including EV connection state and power flow capability. The connection state is inferred from LP dual variables, not from a binary sensor: if an EV's `shadow_power_balance_price` is null, it is unplugged (or driving). If it is present and the setpoint is positive, it is charging. If negative, discharging.
 
-This inference approach means the schema can capture V2G dispatch events without requiring households to install additional hardware or configure additional entities. The LP dual being non-null is a necessary condition for the charger being connected; the setpoint direction distinguishes charging from discharging. This has direct relevance to AEMO's interest in EV flexibility as a demand-response resource, given the projected growth of EVs in the NEM over the next decade.
+This inference approach means the schema can capture V2G dispatch events without requiring households to install additional hardware or configure additional entities. The LP dual being non-null is a necessary condition for the charger being connected; the setpoint direction distinguishes charging from discharging. This has direct relevance to AEMO's interest in EV flexibility as a demand flexibility resource, given the projected growth of EVs in the NEM over the next decade.
 
 **Proposed relationship to the Reporting Track**
 
