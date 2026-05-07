@@ -837,7 +837,8 @@ function renderCounterfactual(d) {
     y: { label: 'Cumulative savings (AUD)', grid: true },
     marks: [
       window.Plot.areaY(cumData, { x: 't', y: 'v', fill: GOLD, fillOpacity: 0.3 }),
-      window.Plot.lineY(cumData, { x: 't', y: 'v', stroke: GOLD, strokeWidth: 2.5, tip: true }),
+      window.Plot.lineY(cumData, { x: 't', y: 'v', stroke: GOLD, strokeWidth: 2.5, tip: true,
+        title: r => r.v == null ? 'no data' : `${fmtAESTDateTime(r.t)}\nCumulative savings: $${r.v.toFixed(2)}` }),
       window.Plot.ruleY([0], { stroke: INK, strokeOpacity: 0.2 }),
     ]
   });
@@ -919,8 +920,10 @@ function renderSpreadRegion(region) {
   }
 
   marks.push(
-    window.Plot.lineY(buyData,  { x: 't', y: 'v', stroke: TEAL, strokeWidth: 2, tip: true }),
-    window.Plot.lineY(sellData, { x: 't', y: 'v', stroke: GOLD, strokeWidth: 2, strokeDasharray: '5 3', tip: true }),
+    window.Plot.lineY(buyData,  { x: 't', y: 'v', stroke: TEAL, strokeWidth: 2, tip: true,
+      title: r => r.v == null ? 'no data' : `${fmtAESTDateTime(r.t)}\nBuy: $${r.v.toFixed(4)}/kWh` }),
+    window.Plot.lineY(sellData, { x: 't', y: 'v', stroke: GOLD, strokeWidth: 2, strokeDasharray: '5 3', tip: true,
+      title: r => r.v == null ? 'no data' : `${fmtAESTDateTime(r.t)}\nSell: $${r.v.toFixed(4)}/kWh` }),
     window.Plot.ruleY([0], { stroke: INK, strokeOpacity: 0.15 })
   );
 
@@ -1003,9 +1006,12 @@ function renderV2gDuty(d) {
     y: { label: '% EVs', domain: [0, 100] },
     color: { domain: states, range: colours, legend: true },
     marks: [
-      window.Plot.areaY(data.filter(r => r.state === 'charging'),   { x: 't', y: 'pct', fill: TEAL,   fillOpacity: 0.7, tip: true }),
-      window.Plot.areaY(data.filter(r => r.state === 'discharging'),{ x: 't', y: 'pct', fill: GOLD,   fillOpacity: 0.7, tip: true }),
-      window.Plot.areaY(data.filter(r => r.state === 'plugged_idle'),{ x: 't', y: 'pct', fill: '#93C5FD', fillOpacity: 0.5, tip: true }),
+      window.Plot.areaY(data.filter(r => r.state === 'charging'),   { x: 't', y: 'pct', fill: TEAL,   fillOpacity: 0.7, tip: true,
+        title: r => `${fmtAESTDateTime(r.t)}\nCharging: ${r.pct.toFixed(0)}% of EVs` }),
+      window.Plot.areaY(data.filter(r => r.state === 'discharging'),{ x: 't', y: 'pct', fill: GOLD,   fillOpacity: 0.7, tip: true,
+        title: r => `${fmtAESTDateTime(r.t)}\nDischarging: ${r.pct.toFixed(0)}% of EVs` }),
+      window.Plot.areaY(data.filter(r => r.state === 'plugged_idle'),{ x: 't', y: 'pct', fill: '#93C5FD', fillOpacity: 0.5, tip: true,
+        title: r => `${fmtAESTDateTime(r.t)}\nPlugged idle: ${r.pct.toFixed(0)}% of EVs` }),
     ]
   });
   el.innerHTML = '';
@@ -1030,9 +1036,11 @@ function renderV2gDispatch(d) {
     x: { type: 'utc', label: 'Time (AEST)', tickFormat: tickAEST },
     y: { label: 'Setpoint (kW, + = charging, - = discharging)', grid: true },
     marks: [
-      window.Plot.areaY(battData, { x: 't', y: 'v', fill: TEAL, fillOpacity: 0.4, tip: true }),
+      window.Plot.areaY(battData, { x: 't', y: 'v', fill: TEAL, fillOpacity: 0.4, tip: true,
+        title: r => r.v == null ? 'no data' : `${fmtAESTDateTime(r.t)}\nHome battery: ${r.v.toFixed(1)} kW` }),
       window.Plot.lineY(battData, { x: 't', y: 'v', stroke: TEAL, strokeWidth: 2 }),
-      window.Plot.areaY(evData,   { x: 't', y: 'v', fill: GOLD, fillOpacity: 0.35, tip: true }),
+      window.Plot.areaY(evData,   { x: 't', y: 'v', fill: GOLD, fillOpacity: 0.35, tip: true,
+        title: r => r.v == null ? 'no data' : `${fmtAESTDateTime(r.t)}\nEV fleet: ${r.v.toFixed(1)} kW` }),
       window.Plot.lineY(evData,   { x: 't', y: 'v', stroke: GOLD, strokeWidth: 2 }),
       window.Plot.ruleY([0], { stroke: INK, strokeOpacity: 0.2 }),
     ]

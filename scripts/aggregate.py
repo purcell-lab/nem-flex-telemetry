@@ -682,16 +682,32 @@ def compute_assets_summary(
         for s in states:
             duty_cycle[f"{s}_pct"] = (hourly_ev[f"is_{s}"] * 100).round(1).tolist()
 
-    # c) V2G dispatch share: hourly mean setpoint by kind
+    # c) V2G dispatch share: hourly mean cohort setpoint by kind (signed kW).
+    # Two-stage aggregation:
+    #   1. cohort sum at each 5-min interval (sum across households+assets of
+    #      that kind), so simultaneous dispatch by multiple assets stacks.
+    #   2. time-mean across the 12 sub-intervals of each hour, so the result
+    #      is reported in kW (not 12*kW). Mirrors the v0.5.1 fix applied to
+    #      compute_flex_stack: a naive .sum() across both axes would 12x-
+    #      inflate the value (a 25 kW DCEV would appear as ~300 kW).
     dispatch_share: dict[str, Any] = {"intervals": [], "battery_kw": [], "ev_kw": []}
     if not assets_df.empty and "setpoint_kw" in assets_df.columns:
         assets_df2 = assets_df.copy()
         assets_df2["setpoint_kw"] = pd.to_numeric(assets_df2["setpoint_kw"], errors="coerce").fillna(0.0)
         assets_df2["hour"] = assets_df2["interval_start_utc"].dt.floor("h")
 
-        hourly_dispatch = (
-            assets_df2.groupby(["hour", "kind"])["setpoint_kw"]
+        # Step 1: cohort sum per 5-min interval, per kind.
+        cohort_5min = (
+            assets_df2.groupby(["interval_start_utc", "kind"])["setpoint_kw"]
             .sum()
+            .reset_index()
+        )
+        cohort_5min["hour"] = cohort_5min["interval_start_utc"].dt.floor("h")
+
+        # Step 2: time-mean over the hour (kW averaged, not summed).
+        hourly_dispatch = (
+            cohort_5min.groupby(["hour", "kind"])["setpoint_kw"]
+            .mean()
             .unstack(fill_value=0.0)
             .reset_index()
         )
