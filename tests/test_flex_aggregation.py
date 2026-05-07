@@ -1,12 +1,22 @@
-"""Unit tests for v0.5.2 flex aggregation logic.
+"""Unit tests for v0.5.3 flex aggregation logic.
 
 Exercises the per-asset flex helpers and household aggregation against
 Mark Purcell's reference stack: 20 kWp PV + 40 kWh battery + 30 kW hybrid
 inverter + 25 kW DCEV bidirectional charger + two EVs + 30 kW grid envelope.
 
-The expected idle outcome is:
-    flex_up   = 30 kW  (battery 5 + DCEV-allocated EV 25, clipped to import 35)
-    flex_down = 5 kW   (battery only; both EVs charge_only at idle, no V2G)
+Topology: hybrid inverter is the AC bus for everything (battery + PV + DCEV).
+DCEV is a DC-DC converter on the DC bus, not a separate AC inverter. So the
+household flex ceiling layers as:
+
+    flex = min( sum(asset.available_*),
+                hybrid inverter rating,
+                grid envelope import/export limit )
+
+For Mark's stack at idle (battery 5 kW rating, both EVs plugged_idle/charge_only):
+    asset_sum_up   = 5 (batt) + 25 (DCEV-allocated EV) + 0 = 30
+    asset_sum_down = 5 (batt) +  0 (no V2G)            + 0 =  5
+    flex_up   = min(30, 30, 35) = 30 kW   (asset sum and inverter both bind)
+    flex_down = min( 5, 30, 30) =  5 kW   (battery alone binds, no V2G active)
 
 Tests are deliberately structural: they exercise the pure flex helpers via
 a minimal stub of the coordinator's hass.states dependency, without booting
@@ -142,6 +152,7 @@ def make_coordinator(state_map: dict[str, float | str]):
     )
     coord.hass = FakeHass(state_map)
     coord._flex_derived_logged = False
+    coord._power_ratings_logged = False
     coord._last_bidirectional_ev_id = None
     return coord
 
@@ -161,12 +172,12 @@ MARKS_STACK = {
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
-def test_battery_flex_idle_clipped_to_inverter():
-    """Battery at idle: full charge + discharge headroom, inverter not binding."""
+def test_battery_flex_idle_returns_raw_rating():
+    """Battery at idle reports its raw DC-side rating (no inverter clip here)."""
     coord = make_coordinator(MARKS_STACK)
     up, down = coord._battery_asset_flex(battery_setpoint_kw=0.0)
-    assert up == 5.0  # min(5 batt, 30 inverter) - 0 = 5
-    assert down == 5.0
+    assert up == 5.0  # number.battery_max_charge_power
+    assert down == 5.0  # number.battery_max_discharge_power
 
 
 def test_battery_flex_charging_reduces_up_headroom():
@@ -176,15 +187,30 @@ def test_battery_flex_charging_reduces_up_headroom():
     assert down == 5.0
 
 
-def test_battery_flex_inverter_binds_when_smaller():
-    """If the inverter is smaller than the battery, it caps charge/discharge."""
+def test_battery_flex_ignores_inverter_per_asset():
+    """Per-asset battery flex must NOT clip to inverter; that's a household ceiling.
+
+    Even if the inverter is tiny (3 kW), per-asset reports the battery's own
+    5 kW rating. The inverter clip is applied later in _build_record.
+    """
     state_map = dict(MARKS_STACK)
     state_map["number.inverter_max_ac_to_dc_power"] = 3.0
     state_map["number.inverter_max_dc_to_ac_power"] = 3.0
     coord = make_coordinator(state_map)
     up, down = coord._battery_asset_flex(battery_setpoint_kw=0.0)
-    assert up == 3.0
-    assert down == 3.0
+    assert up == 5.0  # raw battery rating, not clipped here
+    assert down == 5.0
+
+
+def test_battery_flex_reads_live_high_rating():
+    """If number.battery_max_*_power reports e.g. 10 kW, that's what we use."""
+    state_map = dict(MARKS_STACK)
+    state_map["number.battery_max_charge_power"] = 10.0
+    state_map["number.battery_max_discharge_power"] = 10.0
+    coord = make_coordinator(state_map)
+    up, down = coord._battery_asset_flex(battery_setpoint_kw=0.0)
+    assert up == 10.0
+    assert down == 10.0
 
 
 def test_ev_flex_unplugged_is_zero():
@@ -241,22 +267,24 @@ def test_dcev_allocator_respects_existing_sticky_owner():
     assert up2 == 25.0
 
 
-def test_marks_stack_idle_household_flex():
-    """End-to-end: Mark's stack at idle should yield flex_up=30, flex_down=5.
-
-    - battery (idle): up=5, down=5
-    - ev1 (plugged_idle, charge_only, sticky owner): up=25, down=0
-    - ev2 (plugged_idle, charge_only, NOT sticky owner): up=0, down=0
-    Sum: up=30, down=5; envelope (import 35, export 30) does not bind.
-    """
-    coord = make_coordinator(
-        {
-            **MARKS_STACK,
-            # Envelope
-            "number.grid_import_limit": 35.0,
-            "number.grid_export_limit": 30.0,
-        }
+# ---------------------------------------------------------------------------
+# Helper: replicate the _build_record household aggregation in pure form.
+# Mirrors the layered min() in coordinator.py so tests don't need to mock the
+# full _build_record path.
+# ---------------------------------------------------------------------------
+def _household_flex(coord, asset_records, envelope_import, envelope_export):
+    asset_up_sum = sum(a["available_up_kw"] for a in asset_records)
+    asset_down_sum = sum(a["available_down_kw"] for a in asset_records)
+    inverter_up = coord._read_inverter_ac_to_dc()
+    inverter_down = coord._read_inverter_dc_to_ac()
+    return (
+        min(asset_up_sum, inverter_up, envelope_import),
+        min(asset_down_sum, inverter_down, envelope_export),
     )
+
+
+def _idle_assets(coord):
+    """Build the three asset records for Mark's stack at idle."""
     batt_up, batt_down = coord._battery_asset_flex(0.0)
     ev1_up, ev1_down = coord._ev_asset_flex(
         "ev1", 0.0, "plugged_idle", "charge_only"
@@ -264,26 +292,34 @@ def test_marks_stack_idle_household_flex():
     ev2_up, ev2_down = coord._ev_asset_flex(
         "ev2", 0.0, "plugged_idle", "charge_only"
     )
+    return [
+        {"available_up_kw": batt_up, "available_down_kw": batt_down},
+        {"available_up_kw": ev1_up, "available_down_kw": ev1_down},
+        {"available_up_kw": ev2_up, "available_down_kw": ev2_down},
+    ]
 
-    asset_up = batt_up + ev1_up + ev2_up
-    asset_down = batt_down + ev1_down + ev2_down
-    envelope_import = 35.0
-    envelope_export = 30.0
 
-    flex_up = min(asset_up, envelope_import)
-    flex_down = min(asset_down, envelope_export)
+def test_marks_stack_idle_household_flex():
+    """End-to-end: Mark's stack at idle should yield flex_up=30, flex_down=5.
 
+    Layered ceiling: asset_sum (30/5) <= inverter (30/30) <= envelope (35/30).
+    Asset_sum and inverter are tied for flex_up; battery alone binds flex_down.
+    """
+    coord = make_coordinator(MARKS_STACK)
+    flex_up, flex_down = _household_flex(
+        coord, _idle_assets(coord), envelope_import=35.0, envelope_export=30.0
+    )
     assert flex_up == 30.0, f"expected 30 kW, got {flex_up}"
     assert flex_down == 5.0, f"expected 5 kW (no V2G at idle), got {flex_down}"
 
 
 def test_marks_stack_idle_with_v2g_active():
-    """When ev1 actively discharging (bidirectional), down should reach 30 kW.
+    """V2G dispatching: flex_down rises from 5 to 30 kW.
 
     - battery (idle): up=5, down=5
     - ev1 (discharging, bidirectional): up=25, down=25
     - ev2: up=0, down=0
-    Sum: up=30, down=30; export envelope (30) binds at exactly 30.
+    asset_sum: up=30, down=30. Inverter (30) and export envelope (30) tied.
     """
     coord = make_coordinator(MARKS_STACK)
     batt_up, batt_down = coord._battery_asset_flex(0.0)
@@ -293,9 +329,103 @@ def test_marks_stack_idle_with_v2g_active():
     ev2_up, ev2_down = coord._ev_asset_flex(
         "ev2", 0.0, "plugged_idle", "charge_only"
     )
-
-    flex_up = min(batt_up + ev1_up + ev2_up, 35.0)
-    flex_down = min(batt_down + ev1_down + ev2_down, 30.0)
-
+    assets = [
+        {"available_up_kw": batt_up, "available_down_kw": batt_down},
+        {"available_up_kw": ev1_up, "available_down_kw": ev1_down},
+        {"available_up_kw": ev2_up, "available_down_kw": ev2_down},
+    ]
+    flex_up, flex_down = _household_flex(
+        coord, assets, envelope_import=35.0, envelope_export=30.0
+    )
     assert flex_up == 30.0
-    assert flex_down == 30.0  # full export envelope used
+    assert flex_down == 30.0
+
+
+def test_hybrid_inverter_binds_when_smallest():
+    """If hybrid inverter is smaller than asset_sum and envelope, IT binds.
+
+    Asset sum at idle = 30 (battery 5 + DCEV-allocated EV 25). With a 12 kW
+    hybrid inverter and a generous 35 kW envelope, the inverter is the binding
+    constraint at 12 kW (not the assets, not the grid).
+    """
+    state_map = dict(MARKS_STACK)
+    state_map["number.inverter_max_ac_to_dc_power"] = 12.0
+    state_map["number.inverter_max_dc_to_ac_power"] = 12.0
+    coord = make_coordinator(state_map)
+    flex_up, flex_down = _household_flex(
+        coord, _idle_assets(coord), envelope_import=35.0, envelope_export=30.0
+    )
+    assert flex_up == 12.0  # inverter binds, beating asset sum (30) and envelope (35)
+    assert flex_down == 5.0  # asset sum still binds (battery only at idle)
+
+
+def test_grid_envelope_binds_when_smallest():
+    """Tight CSIP-AUS export envelope (e.g. 8 kW) binds even with V2G active."""
+    coord = make_coordinator(MARKS_STACK)
+    batt_up, batt_down = coord._battery_asset_flex(0.0)
+    ev1_up, ev1_down = coord._ev_asset_flex(
+        "ev1", 0.0, "discharging", "bidirectional"
+    )
+    ev2_up, ev2_down = coord._ev_asset_flex(
+        "ev2", 0.0, "plugged_idle", "charge_only"
+    )
+    assets = [
+        {"available_up_kw": batt_up, "available_down_kw": batt_down},
+        {"available_up_kw": ev1_up, "available_down_kw": ev1_down},
+        {"available_up_kw": ev2_up, "available_down_kw": ev2_down},
+    ]
+    # Tight 8 kW CSIP-AUS export envelope
+    flex_up, flex_down = _household_flex(
+        coord, assets, envelope_import=35.0, envelope_export=8.0
+    )
+    assert flex_up == 30.0
+    assert flex_down == 8.0  # envelope binds, even though assets could deliver 30
+
+
+# ---------------------------------------------------------------------------
+# Power-rating health-check (one-shot startup logging)
+# ---------------------------------------------------------------------------
+def test_health_check_all_live(caplog):
+    """All six number.* power-rating entities present -> 6 live, 0 fallback."""
+    import logging
+    coord = make_coordinator(MARKS_STACK)
+    with caplog.at_level(logging.INFO, logger="custom_components.nem_flex_telemetry.coordinator"):
+        coord._log_power_rating_health_check()
+    text = caplog.text
+    assert "6 live, 0 fallback" in text
+    assert "battery max charge -> 5.0 kW (live" in text
+    assert "hybrid inverter AC->DC -> 30.0 kW (live" in text
+    assert "DCEV charger AC->DC -> 25.0 kW (live" in text
+    assert "FALLBACK" not in text
+    # Re-running must be a no-op (gate honoured).
+    caplog.clear()
+    coord._log_power_rating_health_check()
+    assert caplog.text == ""
+
+
+def test_health_check_logs_fallback_when_entity_missing(caplog):
+    """If a number.* entity is missing, log a WARNING with FALLBACK marker."""
+    import logging
+    state_map = dict(MARKS_STACK)
+    del state_map["number.battery_max_charge_power"]
+    del state_map["number.dcev_inverter_max_dc_to_ac_power"]
+    coord = make_coordinator(state_map)
+    with caplog.at_level(logging.INFO, logger="custom_components.nem_flex_telemetry.coordinator"):
+        coord._log_power_rating_health_check()
+    text = caplog.text
+    assert "4 live, 2 fallback" in text
+    # Battery charge falls back to default (30.0 in v0.5.3).
+    assert "battery max charge -> 30.0 kW (FALLBACK" in text
+    assert "DCEV charger DC->AC -> 25.0 kW (FALLBACK" in text
+
+
+def test_health_check_treats_unavailable_as_fallback(caplog):
+    """An entity reporting 'unavailable' must trigger the fallback path."""
+    import logging
+    state_map = dict(MARKS_STACK)
+    state_map["number.inverter_max_ac_to_dc_power"] = "unavailable"
+    coord = make_coordinator(state_map)
+    with caplog.at_level(logging.INFO, logger="custom_components.nem_flex_telemetry.coordinator"):
+        coord._log_power_rating_health_check()
+    assert "hybrid inverter AC->DC -> 30.0 kW (FALLBACK" in caplog.text
+    assert "5 live, 1 fallback" in caplog.text
