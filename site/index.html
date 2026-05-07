@@ -202,9 +202,9 @@
       <div class="mb-4">
         <h2 class="text-xl font-semibold text-ink mb-1">Counterfactual ledger</h2>
         <p class="text-sm text-ink/60">
-          Cumulative demand flexibility savings in AUD. The formula is asymmetric:
-          net-importing intervals use the buy price ($/kWh); net-exporting intervals use the export price ($/kWh).
-          This correctly accounts for negative feed-in tariff periods.
+          Cumulative demand flexibility savings in AUD from battery and EV dispatch shaping vs. the same household running with setpoint at zero.
+          The formula is asymmetric: net-importing intervals use the buy price ($/kWh), net-exporting use the export price, so negative feed-in periods are accounted for correctly.
+          Caveat: the baseline currently uses realised total_load_kw, so optimiser-driven load shifting (hot water, EV start time, etc.) shows as zero saving. The number reported here is therefore a lower bound.
         </p>
       </div>
 

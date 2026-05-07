@@ -69,6 +69,18 @@ NEM_REGIONS = ["NSW1", "QLD1", "VIC1", "SA1", "TAS1"]
 # 5-minute interval in seconds
 INTERVAL_SECONDS = 300
 
+# Publisher household-ID aliasing.
+#
+# When a publisher re-registers under a new UUID (e.g. after a HA reinstall or
+# a token rotation) the same physical household ends up with two directories
+# under data/raw/. The cohort_size stat (and any per-household groupby) would
+# then double-count it. This map collapses known aliases to their canonical ID.
+# Add new entries here whenever you intend two raw IDs to be treated as one site.
+HOUSEHOLD_ALIAS: dict[str, str] = {
+    # Original test ID -> Mark's canonical UUID (Sunshine Coast QLD).
+    "123": "cd01946f-3770-406e-8936-2c7d039e1b4c",
+}
+
 # Required top-level schema fields (schema v2.0, 18 flat fields + arrays)
 REQUIRED_FIELDS = [
     "schema_version",
@@ -141,7 +153,11 @@ def load_all_jsonl() -> pd.DataFrame:
         return pd.DataFrame(columns=REQUIRED_FIELDS)
 
     for jsonl_path in sorted(DATA_RAW.rglob("*.jsonl")):
-        household_id = jsonl_path.parts[len(DATA_RAW.parts)]
+        raw_household_id = jsonl_path.parts[len(DATA_RAW.parts)]
+        # Collapse known publisher-side ID changes for the same physical site so the
+        # cohort_size stat reflects unique households, not unique POST URLs. New entries
+        # belong here whenever a publisher re-registers under a fresh UUID.
+        household_id = HOUSEHOLD_ALIAS.get(raw_household_id, raw_household_id)
         with jsonl_path.open() as f:
             for line_num, line in enumerate(f, 1):
                 line = line.strip()
