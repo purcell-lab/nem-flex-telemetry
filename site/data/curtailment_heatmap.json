@@ -30,7 +30,7 @@
   ],
   "curtailed_kwh": [
     [
-      1.5322,
+      2.0191,
       0.0,
       0.0,
       0.0,
@@ -112,7 +112,7 @@
       0.0
     ]
   ],
-  "total_curtailed_kwh": 3.112,
+  "total_curtailed_kwh": 3.599,
   "total_curtailed_aud": 0.05,
   "price_unit": "$/kWh"
 }
