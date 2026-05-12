@@ -30,7 +30,7 @@
   ],
   "curtailed_kwh": [
     [
-      0.0,
+      1.5322,
       0.0,
       0.0,
       0.0,
@@ -53,7 +53,7 @@
       0.0,
       0.025,
       0.0,
-      0.4927
+      1.5552
     ]
   ],
   "curtailed_aud": [
@@ -81,7 +81,7 @@
       0.0,
       0.0008,
       0.0,
-      0.0187
+      0.051
     ]
   ],
   "at_cap_share": [
@@ -112,7 +112,7 @@
       0.0
     ]
   ],
-  "total_curtailed_kwh": 0.518,
-  "total_curtailed_aud": 0.02,
+  "total_curtailed_kwh": 3.112,
+  "total_curtailed_aud": 0.05,
   "price_unit": "$/kWh"
 }
