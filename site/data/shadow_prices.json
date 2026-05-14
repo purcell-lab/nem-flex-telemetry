@@ -106,8 +106,8 @@
     ]
   },
   "envelope_shadow_heatmap": {
-    "postcode_prefixes": [
-      "456"
+    "regions": [
+      "QLD1"
     ],
     "hours": [
       0,
@@ -195,8 +195,8 @@
     "export_source": "shadow_solar_forecast_price"
   },
   "grid_envelope_shadow_heatmap": {
-    "postcode_prefixes": [
-      "456"
+    "regions": [
+      "QLD1"
     ],
     "hours": [
       0,

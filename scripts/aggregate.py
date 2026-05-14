@@ -443,7 +443,7 @@ def compute_price_response(df: pd.DataFrame) -> dict[str, Any]:
 
 
 def compute_curtailment_heatmap(df: pd.DataFrame) -> dict[str, Any]:
-    """Tab 3: Export curtailment heatmap (postcode_prefix x hour-of-day).
+    """Tab 3: Export curtailment heatmap (NEM region x hour-of-day).
 
     Quantifies the dollar cost of the static export envelope (typically 5 kW) by
     asking: at each interval, how much solar export was clipped by the envelope,
@@ -478,7 +478,7 @@ def compute_curtailment_heatmap(df: pd.DataFrame) -> dict[str, Any]:
     """
     if df.empty:
         return {
-            "postcode_prefixes": [],
+            "regions": [],
             "hours": list(range(24)),
             "curtailed_kwh": [],
             "curtailed_aud": [],
@@ -505,7 +505,7 @@ def compute_curtailment_heatmap(df: pd.DataFrame) -> dict[str, Any]:
     ).fillna(False).astype(float)
 
     grouped = (
-        df.groupby(["postcode_prefix", "hour"])
+        df.groupby(["region", "hour"])
         .agg(
             curtailed_kwh=("curtailed_kwh", "sum"),
             curtailed_aud=("curtailed_aud", "sum"),
@@ -513,19 +513,21 @@ def compute_curtailment_heatmap(df: pd.DataFrame) -> dict[str, Any]:
         )
     )
 
-    postcodes = sorted(df["postcode_prefix"].unique().tolist())
+    # Order rows by canonical NEM region order; only include regions present in data.
+    present_regions = set(df["region"].unique().tolist())
+    regions = [r for r in NEM_REGIONS if r in present_regions]
 
     def pivot_field(field: str, fill: float) -> list[list[float]]:
         pivot = grouped[field].unstack(fill_value=fill)
         for h in range(24):
             if h not in pivot.columns:
                 pivot[h] = fill
-        pivot = pivot.reindex(postcodes, fill_value=fill)
+        pivot = pivot.reindex(regions, fill_value=fill)
         pivot = pivot[sorted(pivot.columns)]
         return pivot.round(4).values.tolist()
 
     return {
-        "postcode_prefixes": postcodes,
+        "regions": regions,
         "hours": list(range(24)),
         "curtailed_kwh": pivot_field("curtailed_kwh", 0.0),
         "curtailed_aud": pivot_field("curtailed_aud", 0.0),
@@ -759,7 +761,7 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
 
     Two views (all values in $/kWh):
     a) Shadow price distribution: mean shadow_energy_price by hour-of-day (violin proxy)
-    b) Envelope shadow heatmap: postcode_prefix x hour grid of binding envelope shadow prices
+    b) Envelope shadow heatmap: NEM region x hour grid of binding envelope shadow prices
 
     The envelope heatmaps are populated from HAEO's load and solar forecast-limit
     shadow prices, which bind almost continuously and reflect where the forecast
@@ -777,7 +779,7 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
             "p75_shadow_energy_price": [0.0] * 24,
         },
         "envelope_shadow_heatmap": {
-            "postcode_prefixes": [],
+            "regions": [],
             "hours": list(range(24)),
             "import_shadow": [],
             "export_shadow": [],
@@ -785,7 +787,7 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
             "export_source": "shadow_solar_forecast_price",
         },
         "grid_envelope_shadow_heatmap": {
-            "postcode_prefixes": [],
+            "regions": [],
             "hours": list(range(24)),
             "import_shadow": [],
             "export_shadow": [],
@@ -827,7 +829,7 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
         shadow_by_hour["p75_shadow_energy_price"] = [0.0] * 24
 
     def _pivot_one(col: str) -> tuple[list[str], list[list[float]]]:
-        """Pivot a single shadow-price column into (postcode_prefixes, 24h grid).
+        """Pivot a single shadow-price column into (regions, 24h grid).
 
         Returns ([], []) if the column is missing so the caller can decide
         whether to fall back to a zero-filled side.
@@ -836,7 +838,7 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
             return [], []
         series = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
         pivot = (
-            series.groupby([df["postcode_prefix"], df["hour"]])
+            series.groupby([df["region"], df["hour"]])
             .mean()
             .unstack(fill_value=0.0)
         )
@@ -847,7 +849,7 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
         return pivot.index.tolist(), pivot.round(6).values.tolist()
 
     def _pivot_pair(import_col: str, export_col: str) -> dict[str, Any]:
-        """Build a postcode_prefix x hour heatmap pair from two shadow-price columns.
+        """Build a NEM-region x hour heatmap pair from two shadow-price columns.
 
         All inputs and outputs are $/kWh; no unit conversion is applied.
         Each side is built independently: if only one column is present we still
@@ -855,7 +857,7 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
         dropping both.
         """
         result: dict[str, Any] = {
-            "postcode_prefixes": [],
+            "regions": [],
             "hours": list(range(24)),
             "import_shadow": [],
             "export_shadow": [],
@@ -878,22 +880,22 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
                 export_col,
             )
 
-        import_prefixes, import_grid = _pivot_one(import_col)
-        export_prefixes, export_grid = _pivot_one(export_col)
+        import_regions, import_grid = _pivot_one(import_col)
+        export_regions, export_grid = _pivot_one(export_col)
 
-        # Union of prefixes across both sides keeps a row available even when only
-        # one side has data for a given postcode.
-        all_prefixes = sorted(set(import_prefixes) | set(export_prefixes))
+        # Union across both sides, ordered by canonical NEM region order.
+        seen = set(import_regions) | set(export_regions)
+        all_regions = [r for r in NEM_REGIONS if r in seen]
         zero_row = [0.0] * 24
 
-        def _row_for(pc: str, prefixes: list[str], grid: list[list[float]]) -> list[float]:
-            if pc in prefixes:
-                return grid[prefixes.index(pc)]
+        def _row_for(r: str, regions: list[str], grid: list[list[float]]) -> list[float]:
+            if r in regions:
+                return grid[regions.index(r)]
             return zero_row
 
-        result["postcode_prefixes"] = all_prefixes
-        result["import_shadow"] = [_row_for(pc, import_prefixes, import_grid) for pc in all_prefixes]
-        result["export_shadow"] = [_row_for(pc, export_prefixes, export_grid) for pc in all_prefixes]
+        result["regions"] = all_regions
+        result["import_shadow"] = [_row_for(r, import_regions, import_grid) for r in all_regions]
+        result["export_shadow"] = [_row_for(r, export_regions, export_grid) for r in all_regions]
         return result
 
     # b) Primary envelope heatmap: HAEO forecast limit shadows (almost always binding)

@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NEM Flex Telemetry: OpenNEM for the demand side</title>
-  <meta name="description" content="Community-built open-data dashboard of household demand flexibility in the National Electricity Market." />
+  <title>PRR Flex Dashboard: open telemetry for price-responsive resources</title>
+  <meta name="description" content="Open dashboard of household price-responsive flexibility for the AEMO IPRR program, with VSR conformance tracking per NEM region." />
 
   <!-- Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -76,10 +76,10 @@
   <header class="bg-ink text-paper px-6 py-8">
     <div class="max-w-6xl mx-auto">
       <h1 class="font-display text-3xl font-bold text-teal mb-1">
-        NEM Flex Telemetry
+        PRR Flex Dashboard
       </h1>
       <p class="text-paper/80 text-lg mb-6">
-        OpenNEM for the demand side. Community-built open data on household demand flexibility in the National Electricity Market.
+        Open telemetry for price-responsive resources. Household flexibility, dispatch conformance, and shadow prices in $/kWh, by NEM region.
       </p>
 
       <!-- Stats bar -->
@@ -129,6 +129,9 @@
       </button>
       <button class="tab-btn px-4 py-3 text-sm whitespace-nowrap" data-tab="shadow" role="tab" aria-selected="false">
         Shadow prices
+      </button>
+      <button class="tab-btn px-4 py-3 text-sm whitespace-nowrap" data-tab="vsr" role="tab" aria-selected="false">
+        VSR conformance
       </button>
     </nav>
 
@@ -282,7 +285,7 @@
           the marginal cost of one extra kWh of net energy at the meter for the current dispatch interval.
           The envelope heatmaps below populate from HAEO's load and solar forecast-limit shadows,
           which bind almost continuously and reveal where the forecast envelope is shaping dispatch.
-          HAEO publishes shadows in $/kW per 1-minute interval; the dashboard scales by 60 to display $/kWh.
+          All shadow prices are published natively in $/kWh; no unit conversion is applied at the dashboard.
         </p>
       </div>
 
@@ -292,17 +295,55 @@
           <div id="chart-shadow-by-hour"></div>
         </div>
         <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
-          <h3 class="text-sm font-semibold text-ink mb-3">Load forecast envelope shadow by postcode prefix and hour ($/kWh)</h3>
-          <p class="text-xs text-ink/50 mb-3">LP dual on HAEO's load forecast limit. Positive = extra kWh of load increases system cost; negative = relaxing the cap would save money.</p>
+          <h3 class="text-sm font-semibold text-ink mb-3">Load forecast envelope shadow by NEM region and hour ($/kWh)</h3>
+          <p class="text-xs text-ink/50 mb-3">LP dual on HAEO's load forecast limit, sourced from <code>shadow_load_forecast_price</code>. Positive: extra kWh of load increases system cost. Negative: relaxing the cap would save money.</p>
           <div id="chart-shadow-import-heat"></div>
         </div>
       </div>
 
       <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
-        <h3 class="text-sm font-semibold text-ink mb-3">Solar forecast envelope shadow by postcode prefix and hour ($/kWh)</h3>
-        <p class="text-xs text-ink/50 mb-3">LP dual on HAEO's solar forecast limit. Positive = extra solar would earn revenue; negative = export envelope is biting and curtailing dispatch.</p>
+        <h3 class="text-sm font-semibold text-ink mb-3">Solar forecast envelope shadow by NEM region and hour ($/kWh)</h3>
+        <p class="text-xs text-ink/50 mb-3">LP dual on HAEO's solar forecast limit, sourced from <code>shadow_solar_forecast_price</code>. Positive: extra solar would earn revenue. Negative: export envelope is biting and curtailing dispatch.</p>
         <div id="chart-shadow-export-heat"></div>
       </div>
+    </section>
+
+    <!-- Tab 8: VSR conformance -->
+    <section class="tab-panel" id="tab-vsr" role="tabpanel">
+      <div class="mb-4">
+        <h2 class="text-xl font-semibold text-ink mb-1">VSR conformance coverage</h2>
+        <p class="text-sm text-ink/60">
+          AEMO Voluntarily Scheduled Resource (VSR) data points mapped against what the publisher emits today.
+          <span class="font-semibold text-teal">LIVE</span>: streaming now via the schema v2.0 publisher.
+          <span class="font-semibold" style="color:#5C9A6A">EXTENDABLE</span>: schema or config addition, not modelling work.
+          <span class="font-semibold" style="color:#E8B254">WIP</span>: in progress against the IPRR Stage 1 (mid-2027) milestone.
+          <span class="font-semibold text-rust">GAP</span>: aggregator-side or AEMO-side work, outside the household scope.
+          Mapped against the AEMO VSR Guidelines (Nov 2025), SCADA Lite Connection Guide (May 2025), and the 15 May 2026 IPRR stakeholder pack.
+        </p>
+      </div>
+
+      <div id="vsr-summary" class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6"></div>
+
+      <div class="bg-white rounded-xl shadow-sm border border-ink/10 overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="bg-ink text-paper text-left">
+              <th class="px-4 py-3 font-semibold">AEMO data point</th>
+              <th class="px-4 py-3 font-semibold">What it is</th>
+              <th class="px-4 py-3 font-semibold">Source field / sensor</th>
+              <th class="px-4 py-3 font-semibold whitespace-nowrap">Status</th>
+            </tr>
+          </thead>
+          <tbody id="vsr-table-body"></tbody>
+        </table>
+      </div>
+
+      <p class="text-xs text-ink/50 mt-4">
+        Source pack: AEMO VSR Guidelines (Final, Nov 2025), SCADA Lite Connection Guide (May 2025),
+        IPRR Implementation Stakeholder Pack (15 May 2026). Status assessed against the current
+        publisher (schema v2.0) emitting from one household; aggregator roll-up to DUID is out of
+        scope for this dashboard.
+      </p>
     </section>
 
   </main>
@@ -311,7 +352,7 @@
   <footer class="bg-ink text-paper/60 px-6 py-8 mt-12">
     <div class="max-w-6xl mx-auto flex flex-col sm:flex-row justify-between gap-4 text-sm">
       <div>
-        <span class="text-paper font-semibold">NEM Flex Telemetry</span>: OpenNEM for the demand side.
+        <span class="text-paper font-semibold">PRR Flex Dashboard</span>: open telemetry for price-responsive resources.
         <br />Code: <a href="https://github.com/purcell-lab/nem-flex-telemetry/blob/main/LICENSE-CODE" class="text-teal hover:underline">MIT</a>.
         Data: <a href="https://creativecommons.org/licenses/by/4.0/" class="text-teal hover:underline">CC-BY-4.0</a>.
       </div>
@@ -337,16 +378,12 @@ const PAPER = '#F2EFE7';
 const RED   = '#E05252';
 
 // ---------------------------------------------------------------------------
-// Shadow price unit conversion.
-// HAEO publishes shadow prices as the LP dual on a 1-minute energy balance,
-// i.e. $/kW per 1-minute interval. To present in $/kWh we multiply by 60
-// (60 minutes per hour). Applied at the dashboard boundary so aggregator JSON
-// stays in HAEO's native units; if HAEO ever switches to publishing $/kWh
-// directly, drop this back to 1.
+// Shadow prices are now published natively in $/kWh by HAEO and by the
+// aggregator. The dashboard applies no further unit conversion. (Up to
+// v0.5.10 the dashboard scaled shadows by x60 to convert from HAEO's
+// historical $/kW-minute output; that scaling was removed in v0.6.0 when
+// the publisher switched to $/kWh natively.)
 // ---------------------------------------------------------------------------
-const SHADOW_KW_TO_KWH = 60;
-const toShadowKwh = v => (v == null ? null : v * SHADOW_KW_TO_KWH);
-const scaleShadowGrid = grid => (grid || []).map(row => (row || []).map(toShadowKwh));
 
 // ---------------------------------------------------------------------------
 // Time formatting: all chart times rendered in Australia/Brisbane (AEST, UTC+10).
@@ -765,7 +802,10 @@ function drawCurtailmentHeatmap() {
   const el = document.getElementById('chart-curtailment');
   const d = _curtData;
   if (!el) return;
-  if (!d || !d.postcode_prefixes || d.postcode_prefixes.length === 0) {
+  // Accept v0.6.0 `regions` schema; fall back to legacy `postcode_prefixes`
+  // when a cached aggregator output is still on disk.
+  const rows = d ? (d.regions || d.postcode_prefixes || []) : [];
+  if (!d || rows.length === 0) {
     el.innerHTML = '<p class="text-ink/40 text-center py-12">No data yet.</p>';
     return;
   }
@@ -778,11 +818,11 @@ function drawCurtailmentHeatmap() {
 
   const data = [];
   let maxV = 0;
-  d.postcode_prefixes.forEach((pc, pi) => {
+  rows.forEach((region, pi) => {
     d.hours.forEach((h, hi) => {
       const v = grid[pi] && grid[pi][hi] != null ? grid[pi][hi] : 0;
       if (v > maxV) maxV = v;
-      data.push({ postcode: pc, hour: h, hour_aest: utcHourToAEST(h), value: v });
+      data.push({ region, hour: h, hour_aest: utcHourToAEST(h), value: v });
     });
   });
 
@@ -800,7 +840,7 @@ function drawCurtailmentHeatmap() {
 
   const plot = window.Plot.plot({
     width: el.parentElement.clientWidth - 32,
-    height: Math.max(120, d.postcode_prefixes.length * 36 + 80),
+    height: Math.max(120, rows.length * 36 + 80),
     marginLeft: 60,
     x: {
       label: 'Hour of day (AEST)',
@@ -808,17 +848,17 @@ function drawCurtailmentHeatmap() {
       ticks: [0,3,6,9,12,15,18,21],
       tickFormat: h => `${h}:00`,
     },
-    y: { label: 'Postcode prefix', domain: d.postcode_prefixes },
+    y: { label: 'NEM region', domain: rows },
     color: {
       type: 'sequential', scheme: metric.scheme, domain: colorDomain,
       label: metric.label, legend: true,
     },
     marks: [
       window.Plot.cell(data, {
-        x: 'hour_aest', y: 'postcode',
+        x: 'hour_aest', y: 'region',
         fill: 'value',
         tip: true,
-        title: r => `${r.postcode} at ${r.hour_aest}:00 AEST: ${metric.fmt(r.value)}`,
+        title: r => `${r.region} at ${r.hour_aest}:00 AEST: ${metric.fmt(r.value)}`,
       }),
     ]
   });
@@ -1102,20 +1142,21 @@ function renderShadowByHour(d) {
 }
 
 // ---------------------------------------------------------------------------
-// Chart j: Envelope shadow heatmap
+// Chart j: Envelope shadow heatmap (NEM region x hour-of-day, $/kWh)
 // ---------------------------------------------------------------------------
-function renderShadowHeatmap(elId, d, prefixes, labelField) {
+function renderShadowHeatmap(elId, grid, regions, labelField) {
   const el = document.getElementById(elId);
-  if (!d || !prefixes || prefixes.length === 0) {
+  if (!el) return;
+  if (!grid || !regions || regions.length === 0) {
     el.innerHTML = '<p class="text-ink/40 text-center py-8">No envelope shadow data yet.</p>';
     return;
   }
   const data = [];
   let absMax = 0;
-  prefixes.forEach((pc, pi) => {
+  regions.forEach((region, pi) => {
     for (let h = 0; h < 24; h++) {
-      const v = (d[pi] && d[pi][h] != null) ? d[pi][h] : 0;
-      data.push({ postcode: pc, hour: h, hour_aest: utcHourToAEST(h), shadow: v });
+      const v = (grid[pi] && grid[pi][h] != null) ? grid[pi][h] : 0;
+      data.push({ region, hour: h, hour_aest: utcHourToAEST(h), shadow: v });
       if (Math.abs(v) > absMax) absMax = Math.abs(v);
     }
   });
@@ -1123,10 +1164,10 @@ function renderShadowHeatmap(elId, d, prefixes, labelField) {
   const scaleMax = Math.max(absMax, 0.001);
   const plot = window.Plot.plot({
     width: el.parentElement.clientWidth - 32,
-    height: Math.max(100, prefixes.length * 36 + 60),
+    height: Math.max(100, regions.length * 36 + 60),
     marginLeft: 60,
     x: { label: 'Hour of day (AEST)', domain: Array.from({length: 24}, (_, i) => i), ticks: [0,3,6,9,12,15,18,21], tickFormat: h => `${h}:00` },
-    y: { label: 'Postcode prefix', domain: prefixes },
+    y: { label: 'NEM region', domain: regions },
     color: {
       type: 'diverging',
       scheme: 'RdBu',
@@ -1138,12 +1179,12 @@ function renderShadowHeatmap(elId, d, prefixes, labelField) {
     },
     marks: [
       window.Plot.cell(data, {
-        x: 'hour_aest', y: 'postcode',
+        x: 'hour_aest', y: 'region',
         fill: 'shadow',
         tip: true,
         title: r => r.shadow == null
-          ? `${r.postcode} at ${r.hour_aest}:00 AEST: n/a`
-          : `${r.postcode} at ${r.hour_aest}:00 AEST: $${r.shadow.toFixed(5)}/kWh`,
+          ? `${r.region} at ${r.hour_aest}:00 AEST: n/a`
+          : `${r.region} at ${r.hour_aest}:00 AEST: $${r.shadow.toFixed(5)}/kWh`,
       }),
     ]
   });
@@ -1153,22 +1194,101 @@ function renderShadowHeatmap(elId, d, prefixes, labelField) {
 
 function renderShadowPrices(shadowPrices) {
   if (!shadowPrices) return;
-  // Convert all shadow series from HAEO's native $/kW-minute to $/kWh ( x 60 ).
-  // Done here at the boundary so the underlying chart helpers stay unit-agnostic.
-  const sbh = shadowPrices.shadow_by_hour;
-  const sbhScaled = sbh ? {
-    ...sbh,
-    mean_shadow_energy_price: (sbh.mean_shadow_energy_price || []).map(toShadowKwh),
-    p25_shadow_energy_price:  (sbh.p25_shadow_energy_price  || []).map(toShadowKwh),
-    p75_shadow_energy_price:  (sbh.p75_shadow_energy_price  || []).map(toShadowKwh),
-  } : sbh;
-  renderShadowByHour(sbhScaled);
+  // Shadow prices are published natively in $/kWh; no unit conversion applied.
+  renderShadowByHour(shadowPrices.shadow_by_hour);
 
   const hm = shadowPrices.envelope_shadow_heatmap;
   if (hm) {
-    renderShadowHeatmap('chart-shadow-import-heat', scaleShadowGrid(hm.import_shadow), hm.postcode_prefixes, 'import');
-    renderShadowHeatmap('chart-shadow-export-heat', scaleShadowGrid(hm.export_shadow), hm.postcode_prefixes, 'export');
+    // v0.6.0 emits `regions`; older cached payloads may still carry
+    // `postcode_prefixes`. Accept both so a stale fallback renders.
+    const rows = hm.regions || hm.postcode_prefixes || [];
+    renderShadowHeatmap('chart-shadow-import-heat', hm.import_shadow, rows, 'import');
+    renderShadowHeatmap('chart-shadow-export-heat', hm.export_shadow, rows, 'export');
   }
+}
+
+// ---------------------------------------------------------------------------
+// Tab 8: VSR conformance coverage
+// AEMO Voluntarily Scheduled Resource (VSR) data points and what the schema
+// v2.0 publisher emits today. Drives the summary chips and table on the VSR
+// conformance tab. Sources: AEMO VSR Guidelines (Nov 2025), SCADA Lite
+// Connection Guide (May 2025), IPRR Implementation Stakeholder Pack (15 May
+// 2026).
+// ---------------------------------------------------------------------------
+const VSR_STATUS_STYLE = {
+  LIVE:       { bg: '#4FB3BF', fg: '#FFFFFF' },
+  EXTENDABLE: { bg: '#5C9A6A', fg: '#FFFFFF' },
+  WIP:        { bg: '#E8B254', fg: '#0E1416' },
+  GAP:        { bg: '#D78562', fg: '#FFFFFF' },
+};
+
+const VSR_DATAPOINTS = [
+  { aemo: 'Aggregated MW telemetry',          what: 'Net active power at the DUID, 60 s for sub-5 MW VSRs (4 s if larger). SCADA Lite via ICCP or DNP3 SAv5.', source: 'net_import_kw + per-asset setpoint_kw, 1 min',                                  status: 'LIVE' },
+  { aemo: 'Bidirectional 5 min energy',        what: 'Bidirectional 5 min interval energy at the connection point, available via remote acquisition.',           source: 'Wholesale-pass-through meter (Amber), mirrored to dashboard',                  status: 'LIVE' },
+  { aemo: 'Price-quantity forecast (bid)',     what: 'Bid curve every 5 min: net MW at each price tranche, with ramp rates.',                                     source: 'Shadow energy + envelope prices per battery, EV, switchboard ($/kWh)',         status: 'EXTENDABLE' },
+  { aemo: 'Maximum production / consumption',  what: 'MW ceilings the VSR may be dispatched to. Aggregated nameplate, not site by site.',                          source: 'Per-asset nameplate in asset registry; envelope_*_limit_kw on switchboard',     status: 'EXTENDABLE' },
+  { aemo: 'Ramp rates',                        what: 'Aggregate up/down ramps submitted with bids; trigger for dispatch conformance error.',                       source: 'Battery + bidirectional charger ramps measured per minute',                    status: 'LIVE' },
+  { aemo: 'Storage SOC bounds + efficiency',   what: 'Min/max SOC and round-trip efficiency for the storage portion of the VSR.',                                   source: 'Per-asset soc_pct (battery + EVs) every minute; counterfactual ledger',         status: 'LIVE' },
+  { aemo: 'Dispatch conformance evidence',     what: 'Aggregated telemetry vs revenue metering, reconciled by AEMO. Error trigger scales with VSR size + ramp.',  source: 'Counterfactual ledger: optimiser intent vs measured outcome, binding constraint named', status: 'LIVE' },
+  { aemo: 'Standing data: VSR zone + loss factors', what: 'VSR sits in one AEMO zone; transmission loss factor at DUID. Six months notice to switch zones.',         source: 'NEM region in payload; TNI tagging is a config addition',                      status: 'EXTENDABLE' },
+  { aemo: 'DNSP data sharing',                 what: 'VSRP shares NMI lists, VSR status and ramps with the host DNSP (e.g. Energex, Ergon).',                       source: 'CSIP-AUS dynamic envelope polled on grid connection; NMI metadata is a schema extension', status: 'EXTENDABLE' },
+  { aemo: 'Available flexible capacity',        what: 'Real-time upward and downward flex the VSR can sustain across the next dispatch interval.',                  source: 'flex_available_up_kw + flex_available_down_kw, cohort and per-asset',         status: 'LIVE' },
+  { aemo: 'Price responsiveness signal',        what: 'Wholesale and export prices the VSR optimiser sees, paired with realised net flow.',                          source: 'price_signal_seen + price_export_seen ($/kWh) paired with net_import_kw',     status: 'LIVE' },
+  { aemo: 'Envelope constraints (DOEs / FELs)', what: 'Dynamic operating envelope from DNSP, kW import/export ceiling at each interval.',                            source: 'envelope_import_limit_kw + envelope_export_limit_kw (CSIP-AUS)',              status: 'LIVE' },
+  { aemo: 'Counterfactual baseline',            what: 'What the household would have consumed without optimisation, for dispatch-saving attribution.',               source: 'naive_baseline_kw + naive_baseline_method',                                    status: 'LIVE' },
+  { aemo: 'Shadow price layer',                 what: 'LP duals on the meter-balance, forecast envelope, and storage constraints, all in $/kWh.',                    source: 'shadow_energy_price, shadow_load_forecast_price, shadow_solar_forecast_price, shadow_envelope_*_price', status: 'LIVE' },
+  { aemo: 'V2G connection state',               what: 'EV connection state per interval (unplugged / plugged idle / charging / discharging / driving).',           source: 'Inferred from per-asset shadow + setpoint; v2g_duty_cycle view',               status: 'LIVE' },
+  { aemo: 'Aggregator roll-up to DUID',         what: 'NMI → DUID portfolio management, including add/remove NMIs and zone tagging.',                              source: 'Aggregator (Amber SmartShift or equivalent) responsibility',                   status: 'WIP' },
+  { aemo: 'Mode switching (Stage 2)',           what: 'Switching VSR participation modes (active / passive) without re-registration. Stage 2, mid-late 2028.',     source: 'PMS-side, AEMO portfolio management',                                          status: 'WIP' },
+  { aemo: 'Mixed aggregations (Stage 3)',       what: 'Mixed technology VSRs within a single DUID. Stage 3, mid-late 2029. Stage 1 exception: a single residential VPP.', source: 'AEMO energy model + Dispatch subtype work',                                status: 'WIP' },
+  { aemo: 'SCADA Lite connection',              what: 'ICCP or Secure DNP3 SAv5 link to AEMO control centres. Redundancy + risk plan, 3 to 6 month onboarding.', source: 'Aggregator-side build; out of scope for household publisher',                  status: 'GAP' },
+  { aemo: 'FCAS contingency raise (optional)',  what: 'Optional second registration once VSR is live; fast metering and proven response required.',                source: '25 kW bidirectional charger sub-second discharge already tested at household', status: 'EXTENDABLE' },
+];
+
+function renderVsrConformance() {
+  const summaryEl = document.getElementById('vsr-summary');
+  const tbodyEl = document.getElementById('vsr-table-body');
+  if (!summaryEl || !tbodyEl) return;
+
+  // Status counts
+  const counts = { LIVE: 0, EXTENDABLE: 0, WIP: 0, GAP: 0 };
+  VSR_DATAPOINTS.forEach(d => { counts[d.status] = (counts[d.status] || 0) + 1; });
+
+  summaryEl.innerHTML = '';
+  const total = VSR_DATAPOINTS.length;
+  [
+    { key: 'LIVE',       label: 'LIVE',       sub: 'streaming today' },
+    { key: 'EXTENDABLE', label: 'EXTENDABLE', sub: 'schema or config add' },
+    { key: 'WIP',        label: 'WIP',        sub: 'against IPRR roadmap' },
+    { key: 'GAP',        label: 'GAP',        sub: 'aggregator or AEMO side' },
+  ].forEach(card => {
+    const sty = VSR_STATUS_STYLE[card.key];
+    const el = document.createElement('div');
+    el.className = 'rounded-lg p-4 border border-ink/10';
+    el.style.backgroundColor = sty.bg;
+    el.style.color = sty.fg;
+    el.innerHTML = `
+      <div class="text-xs uppercase tracking-widest opacity-80 mb-1">${card.label}</div>
+      <div class="text-3xl font-bold font-display leading-none">${counts[card.key] || 0}<span class="text-base opacity-70"> / ${total}</span></div>
+      <div class="text-xs mt-1 opacity-90">${card.sub}</div>`;
+    summaryEl.appendChild(el);
+  });
+
+  tbodyEl.innerHTML = '';
+  VSR_DATAPOINTS.forEach((d, i) => {
+    const sty = VSR_STATUS_STYLE[d.status] || { bg: '#6B6B6B', fg: '#FFFFFF' };
+    const tr = document.createElement('tr');
+    tr.className = i % 2 === 0 ? 'bg-paper/50' : 'bg-white';
+    tr.innerHTML = `
+      <td class="px-4 py-3 font-semibold text-ink align-top">${d.aemo}</td>
+      <td class="px-4 py-3 text-ink/80 align-top">${d.what}</td>
+      <td class="px-4 py-3 text-ink/70 align-top">${d.source}</td>
+      <td class="px-4 py-3 align-top">
+        <span class="inline-block px-2.5 py-1 rounded-full text-xs font-semibold tracking-wide"
+              style="background-color:${sty.bg};color:${sty.fg}">${d.status}</span>
+      </td>`;
+    tbodyEl.appendChild(tr);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1191,10 +1311,12 @@ async function main() {
     _tabRedraw.spread        = () => { if (_activeSpreadRegion) renderSpreadRegion(_activeSpreadRegion); };
     _tabRedraw.assets        = () => renderAssets(assetsSummary);
     _tabRedraw.shadow        = () => renderShadowPrices(shadowPrices);
+    _tabRedraw.vsr           = () => renderVsrConformance();
     renderCounterfactual(counterfactual);
     renderBuySellSpread(buySellSpread);
     renderAssets(assetsSummary);
     renderShadowPrices(shadowPrices);
+    renderVsrConformance();
   } catch (err) {
     console.error('Dashboard load error:', err);
     document.getElementById('chart-flex').innerHTML =
