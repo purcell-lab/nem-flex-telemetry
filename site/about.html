@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>About: NEM Flex Telemetry</title>
-  <meta name="description" content="About the NEM Flex Telemetry project: open-data household demand flexibility for the National Electricity Market." />
+  <title>About: PRR Flex Dashboard</title>
+  <meta name="description" content="About the PRR Flex Dashboard: open telemetry from household price-responsive resources, aggregated by NEM region for AEMO IPRR/VSR framing." />
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -46,8 +46,8 @@
   <header class="bg-ink text-paper px-6 py-8">
     <div class="max-w-4xl mx-auto">
       <a href="index.html" class="text-teal text-sm hover:underline mb-4 block">&larr; Dashboard</a>
-      <h1 class="font-display text-3xl font-bold text-teal mb-2">About NEM Flex Telemetry</h1>
-      <p class="text-paper/70 text-lg">OpenNEM for the demand side</p>
+      <h1 class="font-display text-3xl font-bold text-teal mb-2">About PRR Flex Dashboard</h1>
+      <p class="text-paper/70 text-lg">Open telemetry from household price-responsive resources, aggregated by NEM region</p>
     </div>
   </header>
 
@@ -57,16 +57,17 @@
     <section>
       <h2 class="font-display text-2xl font-bold text-ink mb-4">What is this?</h2>
       <p class="text-ink/80 leading-relaxed mb-4">
-        NEM Flex Telemetry is an open-data community project that collects 5-minute interval
-        telemetry from household energy optimisers (specifically
+        PRR Flex Dashboard is an open-data community project that collects 1-minute interval
+        telemetry from household price-responsive resources (PRRs) orchestrated by
         <a href="https://github.com/hass-energy/haeo" class="text-teal hover:underline">HAEO</a>
-        running inside Home Assistant) and publishes it as an open dataset under CC-BY-4.0.
+        running inside Home Assistant, and publishes it as an open dataset under CC-BY-4.0,
+        aggregated by NEM region.
       </p>
       <p class="text-ink/80 leading-relaxed mb-4">
         The goal is to build the demand-side equivalent of
         <a href="https://openelectricity.org.au/" class="text-teal hover:underline">OpenElectricity</a>:
-        a community-maintained, publicly accessible picture of how much flexible load exists in the
-        National Electricity Market, where it is, and how it responds to price signals.
+        a community-maintained, publicly accessible picture of how much price-responsive flexible load exists in each
+        NEM region, and how it responds to price signals at the household optimiser layer.
       </p>
       <p class="text-ink/80 leading-relaxed">
         This data is framed as a community-data complement to AEMO's
@@ -79,11 +80,13 @@
 
     <!-- The 12-field schema -->
     <section>
-      <h2 class="font-display text-2xl font-bold text-ink mb-4">The 12-field schema</h2>
+      <h2 class="font-display text-2xl font-bold text-ink mb-4">The household telemetry schema</h2>
       <p class="text-ink/80 leading-relaxed mb-6">
-        Every 5 minutes, each participating household pushes one record. Full specification:
+        Every interval, each participating household pushes one record. Full specification:
         <a href="https://github.com/purcell-lab/nem-flex-telemetry/blob/main/SCHEMA.md" class="text-teal hover:underline">SCHEMA.md</a>.
         Machine-readable: <a href="https://github.com/purcell-lab/nem-flex-telemetry/blob/main/schema/telemetry.schema.json" class="text-teal hover:underline">schema/telemetry.schema.json</a>.
+        From v0.6.0 the dashboard aggregates strictly by <code>region</code>; <code>postcode_prefix</code>
+        remains in the per-household record for privacy-preserving locality but is no longer surfaced in dashboard rollups.
       </p>
 
       <div class="overflow-x-auto rounded-lg shadow-sm border border-ink/10">
@@ -100,7 +103,7 @@
             <tr><td><code>schema_version</code></td><td>string</td><td>literal "2.0"</td><td>Schema version guard, rejects v1.x records</td></tr>
             <tr><td><code>interval_start_utc</code></td><td>string</td><td>ISO8601 UTC</td><td>Interval start timestamp</td></tr>
             <tr><td><code>region</code></td><td>string</td><td>NEM code</td><td>NSW1, QLD1, VIC1, SA1, TAS1</td></tr>
-            <tr><td><code>postcode_prefix</code></td><td>string</td><td>3 digits</td><td>First 3 digits of postcode only (privacy boundary)</td></tr>
+            <tr><td><code>postcode_prefix</code></td><td>string</td><td>3 digits</td><td>First 3 digits of postcode only (privacy boundary). Retained in records; not used for dashboard aggregation from v0.6.0.</td></tr>
             <tr><td><code>net_import_kw</code></td><td>number</td><td>kW, signed</td><td>Net grid import (+) or export (-)</td></tr>
             <tr><td><code>price_signal_seen</code></td><td>number</td><td>$/kWh</td><td>Buy price or tariff signal seen by HAEO optimiser</td></tr>
             <tr><td><code>price_export_seen</code></td><td>number</td><td>$/kWh</td><td>Export (FiT) price seen by HAEO optimiser</td></tr>
@@ -111,10 +114,10 @@
             <tr><td><code>storage_soc_pct</code></td><td>number</td><td>%, 0-100</td><td>Battery state of charge</td></tr>
             <tr><td><code>envelope_import_limit_kw</code></td><td>number</td><td>kW, &ge;0</td><td>Max allowed import (DNSP or firmware constraint)</td></tr>
             <tr><td><code>envelope_export_limit_kw</code></td><td>number</td><td>kW, &ge;0</td><td>Max allowed export</td></tr>
-            <tr><td><code>shadow_price_import</code></td><td>number&nbsp;|&nbsp;null</td><td>$/kWh</td><td>LP dual on import envelope constraint</td></tr>
-            <tr><td><code>shadow_price_export</code></td><td>number&nbsp;|&nbsp;null</td><td>$/kWh</td><td>LP dual on export envelope constraint</td></tr>
-            <tr><td><code>shadow_price_soc_min</code></td><td>number&nbsp;|&nbsp;null</td><td>$/kWh</td><td>LP dual on minimum SOC constraint</td></tr>
-            <tr><td><code>shadow_price_soc_max</code></td><td>number&nbsp;|&nbsp;null</td><td>$/kWh</td><td>LP dual on maximum SOC constraint</td></tr>
+            <tr><td><code>shadow_price_import</code></td><td>number&nbsp;|&nbsp;null</td><td>$/kWh (native)</td><td>LP dual on import envelope constraint, published natively in $/kWh</td></tr>
+            <tr><td><code>shadow_price_export</code></td><td>number&nbsp;|&nbsp;null</td><td>$/kWh (native)</td><td>LP dual on export envelope constraint, published natively in $/kWh</td></tr>
+            <tr><td><code>shadow_price_soc_min</code></td><td>number&nbsp;|&nbsp;null</td><td>$/kWh (native)</td><td>LP dual on minimum SOC constraint, published natively in $/kWh</td></tr>
+            <tr><td><code>shadow_price_soc_max</code></td><td>number&nbsp;|&nbsp;null</td><td>$/kWh (native)</td><td>LP dual on maximum SOC constraint, published natively in $/kWh</td></tr>
             <tr><td><code>naive_baseline_kw</code></td><td>number</td><td>kW, signed</td><td>Estimated consumption without optimisation (the receipts field)</td></tr>
             <tr><td><code>assets[]</code></td><td>array</td><td></td><td>Per-asset records (battery, EV chargers). See SCHEMA.md.</td></tr>
             <tr><td><code>deferrable_loads[]</code></td><td>array</td><td></td><td>Shiftable appliance loads reported by HAEO</td></tr>
@@ -125,12 +128,14 @@
 
     <!-- IPRR framing -->
     <section>
-      <h2 class="font-display text-2xl font-bold text-ink mb-4">IPRR framing</h2>
+      <h2 class="font-display text-2xl font-bold text-ink mb-4">IPRR and VSR framing</h2>
       <p class="text-ink/80 leading-relaxed mb-4">
         AEMO's Integrating Price-Responsive Resources (IPRR) program, and its associated
         <a href="https://www.aemo.com.au/-/media/files/electricity/nem/planning_and_forecasting/unscheduled-price-responsive-resources/final-determination-price-responsive-reporting-guidelines.pdf"
            class="text-teal hover:underline" target="_blank" rel="noopener">Price Responsive Reporting Guidelines</a>,
         require aggregators to report available capacity, price responsiveness, and envelope constraints.
+        From the AEMO 15 May 2026 IPRR stakeholder briefing, the Visible Scheduled Resource (VSR) data points
+        are mapped on the dashboard's <strong>VSR conformance</strong> tab as LIVE / EXTENDABLE / WIP / GAP.
       </p>
       <p class="text-ink/80 leading-relaxed mb-4">
         This project is not a registered aggregator. It is the open-data complement: a community
@@ -183,7 +188,7 @@
             <p class="text-sm text-ink/60 mt-1">
               Install "NEM Flex Telemetry" from HACS, restart HA, then go to
               Settings &rarr; Devices &amp; Services &rarr; Add Integration.
-              Enter your PAT, household ID, postcode prefix, region, and HAEO entity mappings.
+              Enter your PAT, household ID, postcode prefix (recorded but not used for dashboard rollups), region, and HAEO entity mappings.
             </p>
           </div>
         </li>
@@ -214,7 +219,7 @@
   <footer class="bg-ink text-paper/60 px-6 py-8 mt-12">
     <div class="max-w-4xl mx-auto flex flex-col sm:flex-row justify-between gap-4 text-sm">
       <div>
-        <span class="text-paper font-semibold">NEM Flex Telemetry</span>: OpenNEM for the demand side.
+        <span class="text-paper font-semibold">PRR Flex Dashboard</span>: open telemetry from household price-responsive resources, aggregated by NEM region.
         <br />Code: <a href="https://github.com/purcell-lab/nem-flex-telemetry/blob/main/LICENSE-CODE" class="text-teal hover:underline">MIT</a>.
         Data: <a href="https://creativecommons.org/licenses/by/4.0/" class="text-teal hover:underline">CC-BY-4.0</a>.
       </div>
