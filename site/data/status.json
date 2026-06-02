@@ -1,8 +1,8 @@
 {
   "cohort_size": 2,
-  "total_intervals": 10788,
-  "total_savings_aud": -3945.61,
-  "last_updated": "2026-06-02T19:05:06Z",
+  "total_intervals": 10800,
+  "total_savings_aud": -3945.47,
+  "last_updated": "2026-06-02T19:09:01Z",
   "regions": [
     "NSW1",
     "QLD1"
