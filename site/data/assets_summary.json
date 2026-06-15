@@ -1,7 +1,7 @@
 {
   "asset_mix": {
-    "stationary_battery_kwh": 30.34,
-    "ev_kwh": 61.31
+    "stationary_battery_kwh": 29.02,
+    "ev_kwh": 63.66
   },
   "v2g_duty_cycle": {
     "intervals": [
@@ -1964,7 +1964,7 @@
       50.0,
       50.0,
       50.0,
-      100.0
+      7.7
     ],
     "plugged_idle_pct": [
       100.0,
@@ -2945,7 +2945,7 @@
       50.0,
       50.0,
       50.0,
-      0.0
+      92.3
     ],
     "charging_pct": [
       0.0,
@@ -7852,7 +7852,7 @@
       2.29,
       2.11,
       2.02,
-      0.0
+      2.09
     ],
     "ev_kw": [
       0.0,
