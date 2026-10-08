@@ -77,6 +77,9 @@ def _install_ha_stubs() -> None:
     update_coordinator.UpdateFailed = UpdateFailed
     config_entries.ConfigEntry = ConfigEntry
     helpers.update_coordinator = update_coordinator
+    issue_registry = types.ModuleType("homeassistant.helpers.issue_registry")
+    helpers.issue_registry = issue_registry
+    sys.modules["homeassistant.helpers.issue_registry"] = issue_registry
 
     sys.modules["homeassistant"] = ha
     sys.modules["homeassistant.core"] = core
@@ -108,6 +111,7 @@ class _Stub(Exception):
 
 github_client.GitHubPushError = _Stub
 github_client.TokenInvalidError = _Stub
+github_client.PushPermissionError = _Stub
 github_client.NemFlexGitHubClient = MagicMock
 sys.modules[
     "custom_components.nem_flex_telemetry.github_client"
