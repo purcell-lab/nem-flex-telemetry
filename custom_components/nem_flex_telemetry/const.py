@@ -30,6 +30,16 @@ CONF_OPT_IN_COHORT = "opt_in_cohort"
 CONF_LICENCE_AGREED = "licence_agreed"
 CONF_CONSENT_TIMESTAMP = "consent_timestamp"
 
+# Record source (#27). "haeo" builds each record from mapped entities;
+# "nimbus" relays the schema v2.0 record Nimbus publishes on
+# sensor.nimbus_flex_telemetry (attributes.record), see nimbus#1634.
+CONF_SOURCE = "source"
+SOURCE_HAEO = "haeo"
+SOURCE_NIMBUS = "nimbus"
+SOURCES: tuple[str, ...] = (SOURCE_HAEO, SOURCE_NIMBUS)
+NIMBUS_TELEMETRY_ENTITY = "sensor.nimbus_flex_telemetry"
+NIMBUS_FLEX_SWITCH = "switch.nimbus_solver_flex_signals_enabled"
+
 # Asset capacity config keys (asked in async_step_assets)
 CONF_HOME_BATTERY_CAPACITY_KWH = "home_battery_capacity_kwh"
 CONF_EV1_CAPACITY_KWH = "ev1_capacity_kwh"

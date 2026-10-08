@@ -140,12 +140,25 @@
           "entity_shadow_envelope_export_price": "HAEO export envelope shadow price (optional)",
           "home_battery_capacity_kwh": "Home battery capacity (kWh)",
           "ev1_capacity_kwh": "EV 1 battery capacity (kWh)",
-          "ev2_capacity_kwh": "EV 2 battery capacity (kWh)"
+          "ev2_capacity_kwh": "EV 2 battery capacity (kWh)",
+          "source": "Record source"
+        },
+        "data_description": {
+          "source": "HAEO builds each record from the entities mapped below. Nimbus relays the complete record that Nimbus publishes on sensor.nimbus_flex_telemetry, so the mappings below are not used."
         }
       }
     },
     "error": {
-      "entity_required": "This field is required."
+      "entity_required": "This field is required.",
+      "nimbus_not_found": "sensor.nimbus_flex_telemetry was not found. Install or update Nimbus first."
+    }
+  },
+  "selector": {
+    "source": {
+      "options": {
+        "haeo": "HAEO entities (built here)",
+        "nimbus": "Nimbus (relayed from sensor.nimbus_flex_telemetry)"
+      }
     }
   },
   "issues": {

@@ -28,7 +28,8 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import Event, HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -73,13 +74,18 @@ from .const import (
     ENTITY_INVERTER_AC_TO_DC,
     ENTITY_INVERTER_DC_TO_AC,
     GITHUB_REPO,
+    NIMBUS_TELEMETRY_ENTITY,
     RECORDS_PER_PUSH,
     REQUIRED_ENTITY_FIELDS,
+    SOURCE_HAEO,
+    SOURCE_NIMBUS,
+    CONF_SOURCE,
     SCHEMA_VERSION,
     UPDATE_INTERVAL_SECONDS,
     VERSION,
 )
 from .discovery import discover_context_entities, run_global_sweep
+from .nimbus_source import read_nimbus_record
 from homeassistant.helpers import issue_registry as ir
 
 from .github_client import (
@@ -161,6 +167,8 @@ class CoordinatorData:
         self.cohort_size: int = 0
         self.buffer_size: int = 0
         self.skipped_intervals: int = 0
+        self.source: str = SOURCE_HAEO
+        self.source_status: str | None = None
         self.unmapped_entities: list[str] = []
 
 
@@ -191,6 +199,10 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.region: str = self._config[CONF_REGION]
         self._postcode_prefix: str = self._config[CONF_POSTCODE_PREFIX]
         self._github_login: str = self._config.get(CONF_GITHUB_LOGIN, "")
+
+        # Record source (#27): build from mapped entities, or relay Nimbus.
+        self.source: str = self._config.get(CONF_SOURCE) or SOURCE_HAEO
+        self._nimbus_unsub: CALLBACK_TYPE | None = None
 
         # Record buffer (max 24 hours = 288 records). Persisted to
         # .storage/nem_flex_telemetry.<entry_id> so a restart does not lose
@@ -834,6 +846,9 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         Called automatically every UPDATE_INTERVAL_SECONDS by the base class.
         Triggers re-authentication if the stored token is rejected by GitHub.
         """
+        if self.source == SOURCE_NIMBUS:
+            return await self._async_update_from_nimbus()
+
         # One-time context entity discovery
         if not self._context_discovered:
             await self._async_discover_context()
@@ -894,7 +909,11 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
             validated["interval_start_utc"],
             len(self._buffer),
         )
+        return await self._async_after_buffer()
 
+    async def _async_after_buffer(self) -> CoordinatorData:
+        """Push when due and refresh the sensor-facing counters."""
+        self._data.source = self.source
         self._roll_push_day()
 
         # Push when buffer reaches RECORDS_PER_PUSH
@@ -1013,6 +1032,84 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
             _LOGGER.info("Final push timed out; %d record(s) kept for next start",
                          len(self._buffer))
         await self._async_save_state()
+
+    # ------------------------------------------------------------------
+    # Nimbus source (#27, nimbus#1634)
+    # ------------------------------------------------------------------
+
+    @callback
+    def async_start_nimbus_listener(self) -> bool:
+        """Relay each new Nimbus record as soon as Nimbus publishes it.
+
+        Nimbus changes the sensor state once per completed interval. The
+        5-minute poll in ``_async_update_from_nimbus`` is a backstop for a
+        missed event; duplicates are dropped on ``interval_start_utc``.
+        """
+        if self.source != SOURCE_NIMBUS:
+            return False
+
+        async def _ingest_and_notify() -> None:
+            if await self._async_ingest_nimbus():
+                self._data.records_pushed_today = self._records_pushed_today
+                self._data.push_errors = self._push_error_count
+            self.async_update_listeners()
+
+        @callback
+        def _on_change(event: Event) -> None:
+            self.hass.async_create_task(_ingest_and_notify())
+
+        self._nimbus_unsub = async_track_state_change_event(
+            self.hass, [NIMBUS_TELEMETRY_ENTITY], _on_change
+        )
+        return True
+
+    @callback
+    def async_stop_nimbus_listener(self) -> None:
+        """Stop relaying Nimbus records (idempotent)."""
+        if self._nimbus_unsub is not None:
+            self._nimbus_unsub()
+            self._nimbus_unsub = None
+
+    async def _async_ingest_nimbus(self) -> bool:
+        """Buffer the current Nimbus record if it is new and valid."""
+        result = read_nimbus_record(
+            self.hass.states.get(NIMBUS_TELEMETRY_ENTITY),
+            region=self.region,
+            postcode_prefix=self._postcode_prefix,
+        )
+        if result.record is None:
+            if result.reason != self._data.source_status:
+                _LOGGER.warning("Nimbus source: %s", result.reason)
+            self._data.source_status = result.reason
+            return False
+
+        interval = result.record["interval_start_utc"]
+        if any(r.get("interval_start_utc") == interval for r in self._buffer):
+            return False
+        try:
+            validated = await self.hass.async_add_executor_job(
+                self._validate_record, result.record
+            )
+        except vol.Invalid as exc:
+            reason = f"Nimbus record for {interval} failed validation: {exc}"
+            _LOGGER.error("Nimbus source: %s", reason)
+            self._data.source_status = reason
+            return False
+
+        if self._data.source_status:
+            _LOGGER.info("Nimbus source: records available again")
+        self._data.source_status = None
+        self._buffer.append(validated)
+        _LOGGER.debug("Buffered Nimbus record %s (buffer size: %d)", interval, len(self._buffer))
+        if len(self._buffer) >= RECORDS_PER_PUSH:
+            await self._async_push_buffer()
+        self._data.buffer_size = len(self._buffer)
+        return True
+
+    async def _async_update_from_nimbus(self) -> CoordinatorData:
+        """5-minute backstop for the Nimbus source, then the usual push."""
+        await self._async_ingest_nimbus()
+        return await self._async_after_buffer()
 
     def _validate_record(self, record: dict[str, Any]) -> dict[str, Any]:
         """Run lightweight voluptuous validation on the top-level record.
@@ -1138,6 +1235,7 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     async def async_shutdown(self) -> None:
         """Attempt a final flush before unloading."""
+        self.async_stop_nimbus_listener()
         _LOGGER.info(
             "Coordinator shutting down, attempting final push for %s",
             self.household_id,
