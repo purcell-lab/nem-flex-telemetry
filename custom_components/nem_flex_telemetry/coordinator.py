@@ -19,6 +19,7 @@ Version: 0.3.0 / Schema: 2.0
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import deque
 from datetime import UTC, datetime, timedelta
@@ -27,8 +28,10 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, HomeAssistant
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .const import (
     ASSET_DEFAULTS,
@@ -79,6 +82,12 @@ from .discovery import discover_context_entities, run_global_sweep
 from .github_client import GitHubPushError, NemFlexGitHubClient, TokenInvalidError
 
 _LOGGER = logging.getLogger(__name__)
+
+# Persistent state (#18, #19): buffer and push stats survive HA restarts.
+STORAGE_VERSION = 1
+BUFFER_MAX_RECORDS = 288                 # 24 hours of 5-minute records
+COHORT_REFRESH = timedelta(hours=6)
+STOP_PUSH_TIMEOUT_S = 10.0               # best-effort push on HA stop
 
 # EV connection state inference constants
 _SOC_DELTA_PLUGGED_IDLE_MAX = 0.5     # % per interval; below this = plugged_idle
@@ -167,15 +176,22 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._postcode_prefix: str = self._config[CONF_POSTCODE_PREFIX]
         self._github_login: str = self._config.get(CONF_GITHUB_LOGIN, "")
 
-        # In-memory record buffer (max 24 hours = 288 records)
-        self._buffer: deque[dict[str, Any]] = deque(maxlen=288)
+        # Record buffer (max 24 hours = 288 records). Persisted to
+        # .storage/nem_flex_telemetry.<entry_id> so a restart does not lose
+        # records waiting for the hourly push (#18).
+        self._buffer: deque[dict[str, Any]] = deque(maxlen=BUFFER_MAX_RECORDS)
         self._data = CoordinatorData()
+        self._store: Store[dict[str, Any]] = Store(
+            hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}"
+        )
 
         # Lazy-initialised GitHub client
         self._github_client: NemFlexGitHubClient | None = None
         self._push_error_count: int = 0
         self._records_pushed_today: int = 0
-        self._last_push_day: int | None = None
+        # Local (HA timezone) date the daily counter belongs to (#19).
+        self._push_day: str | None = None
+        self._cohort_checked: datetime | None = None
 
         # Flex derivation logging gate
         self._flex_derived_logged: bool = False
@@ -799,41 +815,139 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._data.push_errors = self._push_error_count + 1
             raise UpdateFailed(f"Record validation failed: {exc}") from exc
 
-        self._buffer.append(validated)
+        # A quick restart can rebuild an interval already restored from
+        # storage; keep the first copy (#18).
+        if any(
+            r.get("interval_start_utc") == validated["interval_start_utc"]
+            for r in self._buffer
+        ):
+            _LOGGER.debug("Interval %s already buffered", validated["interval_start_utc"])
+        else:
+            self._buffer.append(validated)
         _LOGGER.debug(
             "Buffered record %s (buffer size: %d)",
             validated["interval_start_utc"],
             len(self._buffer),
         )
 
+        self._roll_push_day()
+
         # Push when buffer reaches RECORDS_PER_PUSH
         if len(self._buffer) >= RECORDS_PER_PUSH:
             await self._async_push_buffer()
 
-        # Reset daily counter at midnight UTC
-        today = datetime.now(tz=UTC).day
-        if self._last_push_day is not None and self._last_push_day != today:
-            self._records_pushed_today = 0
-        self._last_push_day = today
+        await self._async_refresh_cohort_size()
+        self._sync_data()
+        await self._async_save_state()
+        return self._data
 
+    # ------------------------------------------------------------------
+    # Persistent state (#18, #19)
+    # ------------------------------------------------------------------
+
+    def _roll_push_day(self) -> None:
+        """Reset the daily counter at local midnight (HA time zone)."""
+        today = dt_util.now().date().isoformat()
+        if self._push_day != today:
+            if self._push_day is not None:
+                self._records_pushed_today = 0
+            self._push_day = today
+
+    def _sync_data(self) -> None:
+        """Copy internal counters into the sensor-facing data object."""
         self._data.buffer_size = len(self._buffer)
         self._data.records_pushed_today = self._records_pushed_today
         self._data.push_errors = self._push_error_count
 
-        # Fetch cohort size occasionally (~every 6 hours = 72 intervals)
-        if self._records_pushed_today % 72 == 0:
-            try:
-                cohort_size = await self._get_or_create_github_client().get_cohort_size()
-                self._data.cohort_size = cohort_size
-            except TokenInvalidError as exc:
-                _LOGGER.warning(
-                    "Token invalid while fetching cohort size: %s. Triggering reauth.", exc
-                )
-                self.config_entry.async_start_reauth(self.hass)
-            except Exception as exc:  # pylint: disable=broad-except
-                _LOGGER.debug("Could not update cohort size: %s", exc)
+    async def async_load_state(self) -> None:
+        """Restore the buffer and push stats saved before the last restart."""
+        try:
+            stored = await self._store.async_load()
+        except Exception as exc:  # pylint: disable=broad-except
+            _LOGGER.warning("Could not load stored telemetry state: %s", exc)
+            return
+        if not stored:
+            return
 
-        return self._data
+        records = stored.get("buffer") or []
+        for record in records[-BUFFER_MAX_RECORDS:]:
+            self._buffer.append(record)
+
+        stats = stored.get("stats") or {}
+        self._records_pushed_today = int(stats.get("records_pushed_today", 0))
+        self._push_day = stats.get("push_day")
+        self._push_error_count = int(stats.get("push_errors", 0))
+        self._data.cohort_size = int(stats.get("cohort_size", 0))
+        if stats.get("last_push_time"):
+            self._data.last_push_time = dt_util.parse_datetime(stats["last_push_time"])
+        if stats.get("cohort_checked"):
+            self._cohort_checked = dt_util.parse_datetime(stats["cohort_checked"])
+        self._roll_push_day()
+        self._sync_data()
+
+        if records:
+            _LOGGER.info(
+                "Restored %d buffered record(s) for household %s from storage",
+                len(self._buffer),
+                self.household_id,
+            )
+
+    async def _async_save_state(self) -> None:
+        """Persist the buffer and push stats."""
+        last_push = self._data.last_push_time
+        payload = {
+            "buffer": list(self._buffer),
+            "stats": {
+                "records_pushed_today": self._records_pushed_today,
+                "push_day": self._push_day,
+                "push_errors": self._push_error_count,
+                "cohort_size": self._data.cohort_size,
+                "last_push_time": last_push.isoformat() if last_push else None,
+                "cohort_checked": (
+                    self._cohort_checked.isoformat() if self._cohort_checked else None
+                ),
+            },
+        }
+        try:
+            await self._store.async_save(payload)
+        except Exception as exc:  # pylint: disable=broad-except
+            _LOGGER.warning("Could not save telemetry state: %s", exc)
+
+    async def _async_refresh_cohort_size(self) -> None:
+        """Refresh cohort size from the published status.json every 6 hours."""
+        now = datetime.now(tz=UTC)
+        if self._cohort_checked and now - self._cohort_checked < COHORT_REFRESH:
+            return
+        self._cohort_checked = now
+        try:
+            size = await self._get_or_create_github_client().get_cohort_size()
+        except TokenInvalidError as exc:
+            _LOGGER.warning(
+                "Token invalid while fetching cohort size: %s. Triggering reauth.", exc
+            )
+            self.config_entry.async_start_reauth(self.hass)
+            return
+        except Exception as exc:  # pylint: disable=broad-except
+            _LOGGER.debug("Could not update cohort size: %s", exc)
+            return
+        if size is not None:
+            self._data.cohort_size = size
+
+    async def async_handle_stop(self, _event: Event | None = None) -> None:
+        """Save state on Home Assistant stop, then try one final push.
+
+        Home Assistant does not unload config entries on stop, so
+        ``async_shutdown`` alone never ran on a restart (#18). The save comes
+        first so nothing is lost if the push times out.
+        """
+        await self._async_save_state()
+        try:
+            async with asyncio.timeout(STOP_PUSH_TIMEOUT_S):
+                await self._async_push_buffer()
+        except TimeoutError:
+            _LOGGER.info("Final push timed out; %d record(s) kept for next start",
+                         len(self._buffer))
+        await self._async_save_state()
 
     def _validate_record(self, record: dict[str, Any]) -> dict[str, Any]:
         """Run lightweight voluptuous validation on the top-level record.
@@ -926,6 +1040,9 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """Force an immediate push of the current buffer (for manual push service)."""
         _LOGGER.info("Force push triggered for household %s", self.household_id)
         await self._async_push_buffer()
+        self._sync_data()
+        await self._async_save_state()
+        self.async_update_listeners()
 
     async def async_shutdown(self) -> None:
         """Attempt a final flush before unloading."""
@@ -934,3 +1051,5 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self.household_id,
         )
         await self._async_push_buffer()
+        await self._async_save_state()
+        await super().async_shutdown()

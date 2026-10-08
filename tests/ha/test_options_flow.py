@@ -188,6 +188,8 @@ async def test_saving_options_reloads_loaded_entry(hass: HomeAssistant) -> None:
         seen_configs.append(entry_config(entry_))
         coord = MagicMock()
         coord.async_config_entry_first_refresh = AsyncMock()
+        coord.async_load_state = AsyncMock()
+        coord.async_handle_stop = AsyncMock()
         coord.async_shutdown = AsyncMock()
         coord.household_id = entry_.data[CONF_HOUSEHOLD_ID]
         coord.region = entry_.data[CONF_REGION]
