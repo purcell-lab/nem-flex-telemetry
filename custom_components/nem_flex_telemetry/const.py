@@ -9,6 +9,12 @@ PLATFORMS: list[str] = ["sensor"]
 
 VERSION = "0.7.0"
 
+# Sanity guard for LP duals (shadow_* fields), in $/kWh. Duals are not market
+# prices and are not bounded by the -2.0 to 20.0 price window (#30); this guard
+# only catches unit errors and garbage. Keep in step with the JSON schema.
+SHADOW_PRICE_MIN = -1000.0
+SHADOW_PRICE_MAX = 1000.0
+
 # ---------------------------------------------------------------------------
 # OAuth Device Flow constants
 # ---------------------------------------------------------------------------

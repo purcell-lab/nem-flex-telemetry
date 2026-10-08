@@ -5,6 +5,7 @@ on:
     paths:
       - "custom_components/**"
       - "tests/**"
+      - "scripts/aggregate.py"
       - "requirements-test.txt"
       - "pytest.ini"
       - ".github/workflows/tests.yml"
@@ -14,6 +15,7 @@ on:
     paths:
       - "custom_components/**"
       - "tests/**"
+      - "scripts/aggregate.py"
   workflow_dispatch:
 
 permissions:
@@ -42,3 +44,11 @@ jobs:
 
       - name: Home Assistant tests (real core)
         run: python -m pytest tests/ha -q
+
+      # Dashboard aggregation runs in its own venv with the same
+      # dependencies as aggregate.yml (pandas is not part of the HA test pins).
+      - name: Aggregation tests (pandas)
+        run: |
+          python -m venv /tmp/agg
+          /tmp/agg/bin/pip install -q pytest pandas pyarrow jsonschema
+          /tmp/agg/bin/python -m pytest tests/test_aggregate_shadow.py -q -p no:cacheprovider

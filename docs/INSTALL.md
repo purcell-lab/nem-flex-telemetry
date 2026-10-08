@@ -184,6 +184,7 @@ Shadow prices require HAEO v0.3 or later and are optional. Null is valid. If you
 
 - Ensure HAEO is running and producing states for the entities you mapped.
 - If a required input (net import, solar, house load, buy price or sell price) is unavailable, the interval is skipped rather than published as zeros. After the first 15 minutes from startup, one WARNING names the field and entity, and the `skipped_intervals` attribute counts the skipped intervals. Unavailable optional numeric entities default to 0.0, and unavailable shadow price entities become null.
+- If a record fails validation, for example a market price outside -2.0 to 20.0 $/kWh, or a shadow price outside the -1000 to 1000 sanity guard, the interval is skipped and counted in the `validation_errors` attribute. That count is kept across restarts. One WARNING names each failing field. Shadow prices are LP duals, not market prices, and can reach several $/kWh when a constraint binds, for example a full battery at the export limit. They are accepted (#30).
 
 ### "Token invalid" notification appears
 
