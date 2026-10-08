@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/code-MIT-blue?style=flat-square)](LICENSE-CODE)
 [![License: CC BY 4.0](https://img.shields.io/badge/data-CC--BY--4.0-lightgreen?style=flat-square)](LICENSE-DATA)
 
-**Status: v0.7.0.** Schema v2.0: 18 flat fields + assets[] + deferrable_loads[]. All prices in $/kWh. Records built from HAEO entities, or relayed from Nimbus (`sensor.nimbus_flex_telemetry`). Buffer survives restarts. Asset model (home battery + EVs). Connection state inference. Global entity sweep.
+**Status: v0.7.1.** Schema v2.0: 18 flat fields + assets[] + deferrable_loads[]. All prices in $/kWh. Records built from HAEO entities, or relayed from Nimbus (`sensor.nimbus_flex_telemetry`). Buffer survives restarts. Asset model (home battery + EVs). Connection state inference. Global entity sweep.
 
 ## Live dashboard
 

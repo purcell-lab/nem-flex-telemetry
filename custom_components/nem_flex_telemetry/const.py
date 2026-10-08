@@ -7,7 +7,7 @@ import re
 DOMAIN = "nem_flex_telemetry"
 PLATFORMS: list[str] = ["sensor"]
 
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 
 # Sanity guard for LP duals (shadow_* fields), in $/kWh. Duals are not market
 # prices and are not bounded by the -2.0 to 20.0 price window (#30); this guard
