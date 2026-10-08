@@ -183,7 +183,7 @@ Shadow prices require HAEO v0.3 or later and are optional. Null is valid. If you
 ### Entity state is "unavailable" or "unknown"
 
 - Ensure HAEO is running and producing states for the entities you mapped.
-- Unavailable numeric entities default to 0.0. Unavailable shadow price entities become null.
+- If a required input (net import, solar, house load, buy price or sell price) is unavailable, the interval is skipped rather than published as zeros. After the first 15 minutes from startup, one WARNING names the field and entity, and the `skipped_intervals` attribute counts the skipped intervals. Unavailable optional numeric entities default to 0.0, and unavailable shadow price entities become null.
 
 ### "Token invalid" notification appears
 
