@@ -46,6 +46,34 @@ RATE_LIMIT_PAUSE_THRESHOLD = 10
 # ---------------------------------------------------------------------------
 
 
+def dedupe_new_lines(existing_text: str, new_content: str) -> str:
+    """Drop new JSONL lines whose interval_start_utc is already in the file.
+
+    A retry after a push that reached GitHub but timed out locally, or a
+    restored buffer (#18), would otherwise write the same interval twice.
+    """
+    seen: set[str] = set()
+    for line in existing_text.splitlines():
+        try:
+            seen.add(json.loads(line)["interval_start_utc"])
+        except (ValueError, KeyError, TypeError):
+            continue
+    kept: list[str] = []
+    for line in new_content.splitlines():
+        if not line.strip():
+            continue
+        try:
+            key = json.loads(line)["interval_start_utc"]
+        except (ValueError, KeyError, TypeError):
+            kept.append(line)
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(line)
+    return "".join(f"{line}\n" for line in kept)
+
+
 class GitHubPushError(Exception):
     """Raised when a push to GitHub fails after all retries."""
 
@@ -241,8 +269,14 @@ class NemFlexGitHubClient:
                 if existing_content_b64:
                     # Strip line breaks that GitHub adds to base64
                     cleaned = existing_content_b64.replace("\n", "")
-                    existing_bytes = base64.b64decode(cleaned)
-                    combined = existing_bytes.decode("utf-8") + new_content
+                    existing_text = base64.b64decode(cleaned).decode("utf-8")
+                    to_add = dedupe_new_lines(existing_text, new_content)
+                    if not to_add:
+                        _LOGGER.debug("All records already present in %s", file_path)
+                        return
+                    if existing_text and not existing_text.endswith("\n"):
+                        existing_text += "\n"
+                    combined = existing_text + to_add
                 else:
                     combined = new_content
 
@@ -290,22 +324,27 @@ class NemFlexGitHubClient:
             f"Failed to push {file_path} after {MAX_RETRIES} attempts: {last_exc}"
         ) from last_exc
 
-    async def get_cohort_size(self) -> int:
-        """Count the number of household folders in data/raw/.
+    async def get_cohort_size(self) -> int | None:
+        """Return the cohort size published by the aggregation workflow.
 
-        Returns 0 on any error (non-critical metric).
+        Reads ``site/data/status.json`` so the sensor matches the dashboard.
+        Counting ``data/raw/`` folders over-counted aliased IDs such as the
+        ``123`` test folder (#19). Returns None on any error (non-critical).
         """
-        url = self._url(f"/repos/{self._repo_name}/contents/data/raw")
+        url = self._url(f"/repos/{self._repo_name}/contents/site/data/status.json")
+        headers = {**self._headers, "Accept": "application/vnd.github.raw+json"}
         try:
-            async with aiohttp.ClientSession(headers=self._headers) as session:
+            async with aiohttp.ClientSession(headers=headers) as session:
                 async with session.get(url) as resp:
+                    if resp.status == 401:
+                        raise TokenInvalidError("GitHub rejected the stored token (HTTP 401).")
                     if resp.status != 200:
-                        _LOGGER.debug(
-                            "Could not fetch cohort size, HTTP %s", resp.status
-                        )
-                        return 0
-                    items: list[dict[str, Any]] = await resp.json()
-                    return sum(1 for item in items if item.get("type") == "dir")
+                        _LOGGER.debug("Could not fetch cohort size, HTTP %s", resp.status)
+                        return None
+                    status = json.loads(await resp.text())
+                    return int(status.get("cohort_size", 0))
+        except TokenInvalidError:
+            raise
         except Exception as exc:  # pylint: disable=broad-except
             _LOGGER.debug("Could not fetch cohort size: %s", exc)
-            return 0
+            return None

@@ -17,6 +17,7 @@ import logging
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant, ServiceCall
 
 from .const import (
@@ -86,7 +87,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
 
     coordinator = NemFlexTelemetryCoordinator(hass, entry)
+    # Restore records buffered before the last restart (#18), then refresh.
+    await coordinator.async_load_state()
     await coordinator.async_config_entry_first_refresh()
+
+    # Home Assistant does not unload entries on stop, so save the buffer and
+    # attempt a final push when it stops (#18).
+    entry.async_on_unload(
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, coordinator.async_handle_stop)
+    )
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
 

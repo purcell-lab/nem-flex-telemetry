@@ -31,6 +31,7 @@ from .const import (
     SENSOR_LAST_PUSH_TIME,
     SENSOR_PUSH_ERRORS,
     SENSOR_RECORDS_PUSHED_TODAY,
+    VERSION,
 )
 from .coordinator import NemFlexTelemetryCoordinator
 
@@ -103,7 +104,7 @@ class NemFlexTelemetrySensor(CoordinatorEntity[NemFlexTelemetryCoordinator], Sen
             "name": f"NEM Flex Telemetry ({household_id})",
             "manufacturer": "NEM Flex Telemetry",
             "model": "Demand Flexibility Telemetry",
-            "sw_version": "0.1.0",
+            "sw_version": VERSION,
             "configuration_url": "https://github.com/purcell-lab/nem-flex-telemetry",
         }
 
