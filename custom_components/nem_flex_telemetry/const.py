@@ -349,3 +349,19 @@ DEFAULT_ENTITY_MAPPINGS: dict[str, str] = {
     key: spec["primary"] or (spec["fallback"][0] if spec["fallback"] else "")
     for key, spec in DEFAULT_HAEO_ENTITIES.items()
 }
+
+# ---------------------------------------------------------------------------
+# Entity fields that must be mapped. Everything else in DEFAULT_HAEO_ENTITIES
+# (envelope limits, shadow prices, flex sensors) is optional: the coordinator
+# already falls back to defaults or publishes null when they are absent.
+# ---------------------------------------------------------------------------
+REQUIRED_ENTITY_FIELDS: tuple[str, ...] = (
+    CONF_ENTITY_NET_IMPORT,
+    CONF_ENTITY_SOLAR,
+    CONF_ENTITY_TOTAL_LOAD,
+    CONF_ENTITY_PRICE_SIGNAL,
+    CONF_ENTITY_PRICE_EXPORT,
+)
+
+# Domains offered in entity pickers. HAEO publishes inputs as number.*.
+ENTITY_SELECTOR_DOMAINS: tuple[str, ...] = ("sensor", "number", "input_number")

@@ -62,6 +62,8 @@ from .const import (
     CONF_TOKEN,
     DEFAULT_ENTITY_MAPPINGS,
     DOMAIN,
+    ENTITY_SELECTOR_DOMAINS,
+    REQUIRED_ENTITY_FIELDS,
     NEM_REGIONS,
 )
 from .device_flow import (
@@ -104,9 +106,15 @@ _LOGGER = logging.getLogger(__name__)
 HOUSEHOLD_ID_MAX_LEN = 128
 POSTCODE_PREFIX_RE = re.compile(r"^[0-9]{3}$")
 
-# EntitySelector for sensor domain (gives users a dropdown picker)
+# EntitySelector (gives users a dropdown picker).
+# HAEO exposes several inputs as number.* entities (number.solar_forecast,
+# number.grid_import_price, number.grid_import_limit), so the selector must
+# accept those domains as well as sensor.*. A sensor-only selector rejected
+# the discovery defaults on submit.
 _ENTITY_SELECTOR = selector.EntitySelector(
-    selector.EntitySelectorConfig(domain="sensor", multiple=False)
+    selector.EntitySelectorConfig(
+        domain=list(ENTITY_SELECTOR_DOMAINS), multiple=False
+    )
 )
 
 
@@ -673,7 +681,10 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         config_entry: config_entries.ConfigEntry,
     ) -> "NemFlexTelemetryOptionsFlow":
         """Return the options flow handler."""
-        return NemFlexTelemetryOptionsFlow(config_entry)
+        # Home Assistant (2024.11+) supplies ``self.config_entry`` on the
+        # options flow. Do not pass or assign it: recent releases make it a
+        # read-only property and assignment raises AttributeError (#16).
+        return NemFlexTelemetryOptionsFlow()
 
 
 # ---------------------------------------------------------------------------
@@ -682,33 +693,70 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class NemFlexTelemetryOptionsFlow(config_entries.OptionsFlow):
-    """Options flow to update entity mappings without re-entering credentials."""
+    """Options flow to update entity mappings and asset capacities.
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialise options flow."""
-        self.config_entry = config_entry
+    Values are written to ``entry.options``. The coordinator reads the merged
+    view ``{**entry.data, **entry.options}`` (see ``entry_config``), and an
+    update listener reloads the entry so changes take effect immediately.
+
+    Every entity field is written explicitly. A cleared optional field is
+    stored as ``None`` so it overrides the original value in ``entry.data``
+    instead of silently falling back to it.
+    """
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Manage options: update entity mappings with EntitySelector dropdowns."""
+        """Show and save entity mappings and asset capacities."""
         errors: dict[str, str] = {}
-        current = self.config_entry.data
-        all_fields = list(DEFAULT_ENTITY_MAPPINGS.keys())
+        current = {**self.config_entry.data, **self.config_entry.options}
+        entity_fields = list(DEFAULT_ENTITY_MAPPINGS.keys())
 
         if user_input is not None:
-            for field in all_fields:
-                if not user_input.get(field, ""):
+            for field in REQUIRED_ENTITY_FIELDS:
+                if not user_input.get(field):
                     errors[field] = "entity_required"
             if not errors:
-                return self.async_create_entry(title="", data=user_input)
+                new_options: dict[str, Any] = {
+                    field: (user_input.get(field) or None)
+                    for field in entity_fields
+                }
+                for key in _CAPACITY_FIELDS:
+                    if key in user_input:
+                        new_options[key] = float(user_input[key])
+                return self.async_create_entry(title="", data=new_options)
+            # Re-show the form with what the user just entered.
+            current = {**current, **user_input}
 
-        defaults = {
-            field: current.get(field, DEFAULT_ENTITY_MAPPINGS.get(field, ""))
-            for field in all_fields
-        }
         return self.async_show_form(
             step_id="init",
-            data_schema=_entity_schema(all_fields, defaults),
+            data_schema=_options_schema(entity_fields, current),
             errors=errors,
         )
+
+
+_CAPACITY_FIELDS: dict[str, float] = {
+    CONF_HOME_BATTERY_CAPACITY_KWH: 13.5,
+    CONF_EV1_CAPACITY_KWH: 75.0,
+    CONF_EV2_CAPACITY_KWH: 60.0,
+}
+
+
+def _options_schema(entity_fields: list[str], current: dict[str, Any]) -> vol.Schema:
+    """Build the options form.
+
+    Required entity fields use ``vol.Required``; the rest use ``vol.Optional``
+    so they can be left blank. ``suggested_value`` pre-fills the form without
+    forcing a default back in when the user clears a field.
+    """
+    schema: dict[Any, Any] = {}
+    for field in entity_fields:
+        marker = vol.Required if field in REQUIRED_ENTITY_FIELDS else vol.Optional
+        value = current.get(field)
+        description = {"suggested_value": value} if value else None
+        schema[marker(field, description=description)] = _ENTITY_SELECTOR
+    for key, fallback in _CAPACITY_FIELDS.items():
+        schema[vol.Required(key, default=float(current.get(key, fallback)))] = vol.All(
+            vol.Coerce(float), vol.Range(min=0.1, max=500.0)
+        )
+    return vol.Schema(schema)

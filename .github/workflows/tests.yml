@@ -1,0 +1,44 @@
+name: Integration tests
+
+on:
+  pull_request:
+    paths:
+      - "custom_components/**"
+      - "tests/**"
+      - "requirements-test.txt"
+      - "pytest.ini"
+      - ".github/workflows/tests.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "custom_components/**"
+      - "tests/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit and Home Assistant tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: pip install -r requirements-test.txt
+
+      # The two suites run in separate processes. test_flex_aggregation.py
+      # installs Home Assistant stubs into sys.modules, which would break the
+      # real Home Assistant core used by tests/ha.
+      - name: Unit tests (stubbed Home Assistant)
+        run: python -m pytest tests/test_flex_aggregation.py -q
+
+      - name: Home Assistant tests (real core)
+        run: python -m pytest tests/ha -q
