@@ -115,18 +115,21 @@ async def test_options_optional_field_can_be_cleared(hass: HomeAssistant) -> Non
 
 
 async def test_options_required_field_missing(hass: HomeAssistant) -> None:
-    """Omitting a required field is rejected by the schema."""
-    import pytest
-    import voluptuous as vol
+    """With the HAEO source, omitting a required field shows a form error.
 
+    Since #27 the fields are Optional in the form (so the source can be
+    switched to Nimbus in one step) and the HAEO requirement is enforced in
+    the step handler instead of by the schema.
+    """
     entry = _entry(hass)
     result = await hass.config_entries.options.async_init(entry.entry_id)
     user_input = _all_mapped()
     user_input.pop(CONF_ENTITY_TOTAL_LOAD)
-    with pytest.raises(vol.Invalid):
-        await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input=user_input
-        )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input=user_input
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_ENTITY_TOTAL_LOAD: "entity_required"}
 
 
 async def test_options_required_field_blank(hass: HomeAssistant) -> None:

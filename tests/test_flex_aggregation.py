@@ -73,6 +73,13 @@ def _install_ha_stubs() -> None:
 
     core.HomeAssistant = HomeAssistant
     core.ServiceCall = ServiceCall
+    core.Event = object
+    core.CALLBACK_TYPE = object
+    core.callback = lambda func: func
+    event_mod = types.ModuleType("homeassistant.helpers.event")
+    event_mod.async_track_state_change_event = lambda *a, **k: (lambda: None)
+    helpers.event = event_mod
+    sys.modules["homeassistant.helpers.event"] = event_mod
     update_coordinator.DataUpdateCoordinator = DataUpdateCoordinator
     update_coordinator.UpdateFailed = UpdateFailed
     config_entries.ConfigEntry = ConfigEntry

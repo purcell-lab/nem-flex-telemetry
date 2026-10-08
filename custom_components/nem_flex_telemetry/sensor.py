@@ -136,4 +136,8 @@ class NemFlexTelemetrySensor(CoordinatorEntity[NemFlexTelemetryCoordinator], Sen
             "skipped_intervals": (
                 self.coordinator.data.skipped_intervals if self.coordinator.data else 0
             ),
+            "source": self.coordinator.source,
+            "source_status": (
+                self.coordinator.data.source_status if self.coordinator.data else None
+            ),
         }

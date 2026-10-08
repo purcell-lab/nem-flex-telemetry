@@ -95,6 +95,8 @@ In HACS, add this repo as a custom Integration source: `https://github.com/purce
 
 Full guide: [docs/INSTALL.md](docs/INSTALL.md)
 
+**Nimbus users:** set **Record source** to **Nimbus** in the integration options to relay the record Nimbus publishes, with no HAEO entity mapping. See [docs/INSTALL.md](docs/INSTALL.md#optional-use-nimbus-as-the-record-source).
+
 ---
 
 ## Privacy posture

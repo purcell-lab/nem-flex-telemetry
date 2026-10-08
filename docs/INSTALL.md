@@ -93,6 +93,17 @@ Any matched entities not already mapped are shown as "detected but unmapped" in 
 
 ---
 
+### Optional: use Nimbus as the record source
+
+If you run [Nimbus](https://github.com/code-imstillalive/nimbus) v0.94.443 or later, this integration can relay the complete record Nimbus publishes on `sensor.nimbus_flex_telemetry`, instead of building one from HAEO entities. Nimbus supplies the measurements. This integration still handles GitHub sign-in, the household ID, the buffer and the push, so Nimbus never needs a GitHub token.
+
+1. In Nimbus, turn on `switch.nimbus_solver_flex_signals_enabled`. Nimbus only builds a record while flex ranging is on, and ranging makes each solve slower (nimbus#1634).
+2. Go to Settings > Devices and Services > NEM Flex Telemetry > Configure.
+3. Set **Record source** to **Nimbus** and save. The entity mappings are then ignored.
+4. Check the `source` and `source_status` attributes on any NEM Flex Telemetry sensor. A `source_status` of none means records are flowing. Otherwise it says why no record was relayed.
+
+A Nimbus record is relayed unchanged, and only if its `region` and `postcode_prefix` match this integration's settings. Each interval is relayed once, even if the sensor updates twice.
+
 ## Step 6: Asset configuration
 
 The config flow shows a summary of the discovered assets (home battery, EV1, EV2) and asks for their energy capacities:

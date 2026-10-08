@@ -90,6 +90,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Restore records buffered before the last restart (#18), then refresh.
     await coordinator.async_load_state()
     await coordinator.async_config_entry_first_refresh()
+    # Nimbus source (#27): relay each record as Nimbus publishes it.
+    if coordinator.async_start_nimbus_listener():
+        entry.async_on_unload(coordinator.async_stop_nimbus_listener)
 
     # Home Assistant does not unload entries on stop, so save the buffer and
     # attempt a final push when it stops (#18).

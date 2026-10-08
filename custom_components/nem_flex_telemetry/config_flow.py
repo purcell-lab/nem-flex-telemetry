@@ -60,9 +60,14 @@ from .const import (
     CONF_POSTCODE_PREFIX,
     CONF_REGION,
     CONF_TOKEN,
+    CONF_SOURCE,
     DEFAULT_ENTITY_MAPPINGS,
     DOMAIN,
     GITHUB_REPO,
+    NIMBUS_TELEMETRY_ENTITY,
+    SOURCE_HAEO,
+    SOURCE_NIMBUS,
+    SOURCES,
     ENTITY_SELECTOR_DOMAINS,
     REQUIRED_ENTITY_FIELDS,
     NEM_REGIONS,
@@ -740,14 +745,22 @@ class NemFlexTelemetryOptionsFlow(config_entries.OptionsFlow):
         entity_fields = list(DEFAULT_ENTITY_MAPPINGS.keys())
 
         if user_input is not None:
-            for field in REQUIRED_ENTITY_FIELDS:
-                if not user_input.get(field):
-                    errors[field] = "entity_required"
+            source = user_input.get(CONF_SOURCE, SOURCE_HAEO)
+            if source == SOURCE_NIMBUS:
+                # Nimbus supplies the whole record, so entity mappings are
+                # not needed; the sensor must exist (#27).
+                if self.hass.states.get(NIMBUS_TELEMETRY_ENTITY) is None:
+                    errors[CONF_SOURCE] = "nimbus_not_found"
+            else:
+                for field in REQUIRED_ENTITY_FIELDS:
+                    if not user_input.get(field):
+                        errors[field] = "entity_required"
             if not errors:
                 new_options: dict[str, Any] = {
                     field: (user_input.get(field) or None)
                     for field in entity_fields
                 }
+                new_options[CONF_SOURCE] = source
                 for key in _CAPACITY_FIELDS:
                     if key in user_input:
                         new_options[key] = float(user_input[key])
@@ -776,9 +789,22 @@ def _options_schema(entity_fields: list[str], current: dict[str, Any]) -> vol.Sc
     so they can be left blank. ``suggested_value`` pre-fills the form without
     forcing a default back in when the user clears a field.
     """
-    schema: dict[Any, Any] = {}
+    schema: dict[Any, Any] = {
+        vol.Required(CONF_SOURCE, default=current.get(CONF_SOURCE) or SOURCE_HAEO): (
+            selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=list(SOURCES),
+                    translation_key=CONF_SOURCE,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            )
+        )
+    }
     for field in entity_fields:
-        marker = vol.Required if field in REQUIRED_ENTITY_FIELDS else vol.Optional
+        # Every mapping is Optional in the form so the user can switch the
+        # source to Nimbus in one step (#27). With the HAEO source, the
+        # required fields are enforced in async_step_init instead.
+        marker = vol.Optional
         value = current.get(field)
         description = {"suggested_value": value} if value else None
         schema[marker(field, description=description)] = _ENTITY_SELECTOR
