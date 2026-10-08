@@ -117,33 +117,33 @@
     },
     "shadow_energy_price": {
       "type": ["number", "null"],
-      "minimum": -2.0,
-      "maximum": 20.0,
-      "description": "Cross-check / aggregate shadow energy price ($/kWh). LP dual from HAEO for the energy balance constraint."
+      "minimum": -1000.0,
+      "maximum": 1000.0,
+      "description": "Cross-check / aggregate shadow energy price ($/kWh). LP dual from HAEO for the energy balance constraint. Not a market price: an LP dual grows large when a hard constraint binds, so the -1000 to 1000 range is a sanity guard only."
     },
     "shadow_load_forecast_price": {
       "type": ["number", "null"],
-      "minimum": -2.0,
-      "maximum": 20.0,
-      "description": "HAEO LP dual for the load forecast constraint ($/kWh). From sensor.load_forecast_limit_shadow_price."
+      "minimum": -1000.0,
+      "maximum": 1000.0,
+      "description": "HAEO LP dual for the load forecast constraint ($/kWh). From sensor.load_forecast_limit_shadow_price. Not a market price: an LP dual grows large when a hard constraint binds, so the -1000 to 1000 range is a sanity guard only."
     },
     "shadow_solar_forecast_price": {
       "type": ["number", "null"],
-      "minimum": -2.0,
-      "maximum": 20.0,
-      "description": "HAEO LP dual for the solar forecast constraint ($/kWh). From sensor.solar_forecast_limit_shadow_price."
+      "minimum": -1000.0,
+      "maximum": 1000.0,
+      "description": "HAEO LP dual for the solar forecast constraint ($/kWh). From sensor.solar_forecast_limit_shadow_price. Not a market price: an LP dual grows large when a hard constraint binds, so the -1000 to 1000 range is a sanity guard only."
     },
     "shadow_envelope_import_price": {
       "type": ["number", "null"],
-      "minimum": -2.0,
-      "maximum": 20.0,
-      "description": "HAEO LP dual for the grid import envelope constraint ($/kWh). From sensor.grid_max_import_power_shadow_price. Non-zero when the import envelope is binding."
+      "minimum": -1000.0,
+      "maximum": 1000.0,
+      "description": "HAEO LP dual for the grid import envelope constraint ($/kWh). From sensor.grid_max_import_power_shadow_price. Non-zero when the import envelope is binding. Not a market price: an LP dual grows large when a hard constraint binds, so the -1000 to 1000 range is a sanity guard only."
     },
     "shadow_envelope_export_price": {
       "type": ["number", "null"],
-      "minimum": -2.0,
-      "maximum": 20.0,
-      "description": "HAEO LP dual for the grid export envelope constraint ($/kWh). From sensor.grid_max_export_power_shadow_price. Non-zero when the export envelope is binding."
+      "minimum": -1000.0,
+      "maximum": 1000.0,
+      "description": "HAEO LP dual for the grid export envelope constraint ($/kWh). From sensor.grid_max_export_power_shadow_price. Non-zero when the export envelope is binding. Not a market price: an LP dual grows large when a hard constraint binds, so the -1000 to 1000 range is a sanity guard only."
     },
     "assets": {
       "type": "array",
@@ -202,9 +202,9 @@
           },
           "shadow_power_balance_price": {
             "type": ["number", "null"],
-            "minimum": -2.0,
-            "maximum": 20.0,
-            "description": "HAEO LP dual for this asset's power balance constraint ($/kWh). Null when asset is unavailable or unplugged."
+            "minimum": -1000.0,
+            "maximum": 1000.0,
+            "description": "HAEO LP dual for this asset's power balance constraint ($/kWh). Null when asset is unavailable or unplugged. Not a market price: an LP dual grows large when a hard constraint binds, so the -1000 to 1000 range is a sanity guard only."
           },
           "connection_state": {
             "type": "string",

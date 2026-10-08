@@ -69,6 +69,10 @@ NEM_REGIONS = ["NSW1", "QLD1", "VIC1", "SA1", "TAS1"]
 # 5-minute interval in seconds
 INTERVAL_SECONDS = 300
 
+# |shadow_energy_price| above this ($/kWh) is counted as a constraint-bound
+# interval: beyond the market-price window, so a penalty-driven dual (#30).
+SHADOW_BOUND_THRESHOLD = 2.0
+
 # Publisher household-ID aliasing.
 #
 # When a publisher re-registers under a new UUID (e.g. after a HA reinstall or
@@ -760,8 +764,15 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
     """Tab 7: Shadow prices.
 
     Two views (all values in $/kWh):
-    a) Shadow price distribution: mean shadow_energy_price by hour-of-day (violin proxy)
-    b) Envelope shadow heatmap: NEM region x hour grid of binding envelope shadow prices
+    a) Shadow price distribution: median shadow_energy_price by hour-of-day,
+       with the p25 to p75 band (violin proxy)
+    b) Envelope shadow heatmap: NEM region x hour grid of median envelope shadow prices
+
+    Shadow prices are LP duals, not market prices. They grow large when a hard
+    constraint binds (for example a full battery with the export envelope
+    binding), so medians are used throughout and intervals with
+    |shadow_energy_price| above SHADOW_BOUND_THRESHOLD are counted per hour as
+    constraint-bound rather than averaged in (#30).
 
     The envelope heatmaps are populated from HAEO's load and solar forecast-limit
     shadow prices, which bind almost continuously and reflect where the forecast
@@ -774,9 +785,12 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
     empty = {
         "shadow_by_hour": {
             "hours": list(range(24)),
+            "median_shadow_energy_price": [0.0] * 24,
             "mean_shadow_energy_price": [0.0] * 24,
             "p25_shadow_energy_price": [0.0] * 24,
             "p75_shadow_energy_price": [0.0] * 24,
+            "bound_intervals": [0] * 24,
+            "bound_threshold": SHADOW_BOUND_THRESHOLD,
         },
         "envelope_shadow_heatmap": {
             "regions": [],
@@ -812,21 +826,35 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
     df["hour"] = df["interval_start_utc"].dt.hour
 
     # a) Shadow energy price distribution by hour (all $/kWh)
-    shadow_by_hour: dict[str, Any] = {"hours": list(range(24))}
+    shadow_by_hour: dict[str, Any] = {
+        "hours": list(range(24)),
+        "bound_threshold": SHADOW_BOUND_THRESHOLD,
+    }
     shadow_col = "shadow_energy_price"
     if shadow_col in df.columns and df[shadow_col].notna().any():
+        series = pd.to_numeric(df[shadow_col], errors="coerce")
         stats = (
-            df.groupby("hour")[shadow_col]
-            .agg(mean="mean", p25=lambda x: x.quantile(0.25), p75=lambda x: x.quantile(0.75))
+            series.groupby(df["hour"])
+            .agg(
+                median="median",
+                mean="mean",
+                p25=lambda x: x.quantile(0.25),
+                p75=lambda x: x.quantile(0.75),
+                bound=lambda x: int((x.abs() > SHADOW_BOUND_THRESHOLD).sum()),
+            )
             .reindex(range(24), fill_value=0.0)
         )
+        shadow_by_hour["median_shadow_energy_price"] = stats["median"].round(6).tolist()
         shadow_by_hour["mean_shadow_energy_price"] = stats["mean"].round(6).tolist()
         shadow_by_hour["p25_shadow_energy_price"] = stats["p25"].round(6).tolist()
         shadow_by_hour["p75_shadow_energy_price"] = stats["p75"].round(6).tolist()
+        shadow_by_hour["bound_intervals"] = [int(v) for v in stats["bound"].tolist()]
     else:
+        shadow_by_hour["median_shadow_energy_price"] = [0.0] * 24
         shadow_by_hour["mean_shadow_energy_price"] = [0.0] * 24
         shadow_by_hour["p25_shadow_energy_price"] = [0.0] * 24
         shadow_by_hour["p75_shadow_energy_price"] = [0.0] * 24
+        shadow_by_hour["bound_intervals"] = [0] * 24
 
     def _pivot_one(col: str) -> tuple[list[str], list[list[float]]]:
         """Pivot a single shadow-price column into (regions, 24h grid).
@@ -839,7 +867,7 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
         series = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
         pivot = (
             series.groupby([df["region"], df["hour"]])
-            .mean()
+            .median()
             .unstack(fill_value=0.0)
         )
         for h in range(24):

@@ -292,6 +292,7 @@
       <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
         <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
           <h3 class="text-sm font-semibold text-ink mb-3">Switchboard shadow energy price by hour of day ($/kWh)</h3>
+          <p class="text-xs text-ink/50 mb-3">Median with the p25 to p75 band. An LP dual, not a market price: it can reach several $/kWh when a hard constraint binds, such as a full battery at the export limit. Intervals above 2 $/kWh are counted as constraint-bound in the tooltip.</p>
           <div id="chart-shadow-by-hour"></div>
         </div>
         <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
@@ -1122,7 +1123,8 @@ function renderShadowByHour(d) {
   const data = d.hours.map((h, i) => ({
     hour: h,
     hour_aest: utcHourToAEST(h),
-    mean: d.mean_shadow_energy_price[i] || 0,
+    median: (d.median_shadow_energy_price || d.mean_shadow_energy_price)[i] || 0,
+    bound: (d.bound_intervals && d.bound_intervals[i]) || 0,
     p25:  d.p25_shadow_energy_price[i]  || 0,
     p75:  d.p75_shadow_energy_price[i]  || 0,
   })).sort((a, b) => a.hour_aest - b.hour_aest);
@@ -1133,7 +1135,8 @@ function renderShadowByHour(d) {
     y: { label: 'Shadow energy price ($/kWh)', grid: true },
     marks: [
       window.Plot.areaY(data, { x: 'hour_aest', y1: 'p25', y2: 'p75', fill: TEAL, fillOpacity: 0.3 }),
-      window.Plot.lineY(data, { x: 'hour_aest', y: 'mean', stroke: TEAL, strokeWidth: 2.5, tip: true }),
+      window.Plot.lineY(data, { x: 'hour_aest', y: 'median', stroke: TEAL, strokeWidth: 2.5, tip: true,
+        title: r => `${r.hour_aest}:00 AEST\nMedian ${r.median.toFixed(3)} $/kWh\nConstraint-bound intervals: ${r.bound}` }),
       window.Plot.ruleY([0], { stroke: INK, strokeOpacity: 0.15 }),
     ]
   });

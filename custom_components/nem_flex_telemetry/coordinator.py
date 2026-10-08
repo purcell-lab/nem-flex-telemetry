@@ -31,11 +31,13 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.storage import Store
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
 from .const import (
     ASSET_DEFAULTS,
+    SHADOW_PRICE_MAX,
+    SHADOW_PRICE_MIN,
     CONF_EV1_CAPACITY_KWH,
     CONF_EV2_CAPACITY_KWH,
     CONF_ENTITY_ENVELOPE_EXPORT,
@@ -167,6 +169,7 @@ class CoordinatorData:
         self.cohort_size: int = 0
         self.buffer_size: int = 0
         self.skipped_intervals: int = 0
+        self.validation_errors: int = 0
         self.source: str = SOURCE_HAEO
         self.source_status: str | None = None
         self.unmapped_entities: list[str] = []
@@ -233,6 +236,10 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._intervals_seen: int = 0
         self._skipped_intervals: int = 0
         self._missing_warned: frozenset[str] = frozenset()
+        # Records rejected by _validate_record (#30): counted and persisted
+        # separately from push errors; one WARNING per failing field.
+        self._validation_error_count: int = 0
+        self._invalid_warned: set[str] = set()
 
         # Context entities discovered at first update
         self._context_entities: dict[str, str | None] = {}
@@ -889,11 +896,10 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 self._validate_record, record
             )
         except vol.Invalid as exc:
-            _LOGGER.error(
-                "Telemetry record validation failed: %s. Record: %s", exc, record
-            )
-            self._data.push_errors = self._push_error_count + 1
-            raise UpdateFailed(f"Record validation failed: {exc}") from exc
+            # Skip this interval and count it; do not fail the update, which
+            # would mark every diagnostic sensor unavailable (#30).
+            self._note_validation_error(exc, record)
+            return await self._async_after_buffer()
 
         # A quick restart can rebuild an interval already restored from
         # storage; keep the first copy (#18).
@@ -937,11 +943,34 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 self._records_pushed_today = 0
             self._push_day = today
 
+    def _note_validation_error(self, exc: vol.Invalid, record: dict[str, Any]) -> None:
+        """Count a rejected record; warn once per failing field (#30)."""
+        self._validation_error_count += 1
+        field = ".".join(str(p) for p in exc.path) or "record"
+        value = record
+        for part in exc.path:
+            try:
+                value = value[part]
+            except (KeyError, IndexError, TypeError):
+                value = None
+                break
+        if field not in self._invalid_warned:
+            self._invalid_warned.add(field)
+            _LOGGER.warning(
+                "Skipping telemetry interval %s: %s (value %r). Further failures "
+                "on this field are counted in the validation_errors attribute.",
+                record.get("interval_start_utc"),
+                exc,
+                value,
+            )
+        _LOGGER.debug("Rejected record: %s", record)
+
     def _sync_data(self) -> None:
         """Copy internal counters into the sensor-facing data object."""
         self._data.buffer_size = len(self._buffer)
         self._data.records_pushed_today = self._records_pushed_today
         self._data.push_errors = self._push_error_count
+        self._data.validation_errors = self._validation_error_count
 
     async def async_load_state(self) -> None:
         """Restore the buffer and push stats saved before the last restart."""
@@ -961,6 +990,7 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._records_pushed_today = int(stats.get("records_pushed_today", 0))
         self._push_day = stats.get("push_day")
         self._push_error_count = int(stats.get("push_errors", 0))
+        self._validation_error_count = int(stats.get("validation_errors", 0))
         self._data.cohort_size = int(stats.get("cohort_size", 0))
         if stats.get("last_push_time"):
             self._data.last_push_time = dt_util.parse_datetime(stats["last_push_time"])
@@ -985,6 +1015,7 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 "records_pushed_today": self._records_pushed_today,
                 "push_day": self._push_day,
                 "push_errors": self._push_error_count,
+                "validation_errors": self._validation_error_count,
                 "cohort_size": self._data.cohort_size,
                 "last_push_time": last_push.isoformat() if last_push else None,
                 "cohort_checked": (
@@ -1091,9 +1122,9 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 self._validate_record, result.record
             )
         except vol.Invalid as exc:
-            reason = f"Nimbus record for {interval} failed validation: {exc}"
-            _LOGGER.error("Nimbus source: %s", reason)
-            self._data.source_status = reason
+            self._note_validation_error(exc, result.record)
+            self._data.source_status = f"Nimbus record for {interval} failed validation: {exc}"
+            self._data.validation_errors = self._validation_error_count
             return False
 
         if self._data.source_status:
@@ -1117,10 +1148,21 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         Full JSON Schema validation (additionalProperties etc.) is run by the
         CI workflow via jsonschema. Here we just confirm critical fields are
         present and prices are in plausible $/kWh range.
+
+        Market prices use the -2.0 to 20.0 $/kWh window. LP duals (shadow_*)
+        are not market prices: they grow without a price-cap bound when a hard
+        constraint binds, so they only get a wide sanity guard (#30).
         """
         _NEM_REGIONS = vol.In(["NSW1", "QLD1", "VIC1", "SA1", "TAS1"])
         _PRICE_RANGE = vol.All(vol.Coerce(float), vol.Range(min=-2.0, max=20.0))
+        _SHADOW_RANGE = vol.All(
+            vol.Coerce(float), vol.Range(min=SHADOW_PRICE_MIN, max=SHADOW_PRICE_MAX)
+        )
         _KW_NON_NEG = vol.All(vol.Coerce(float), vol.Range(min=0))
+        _ASSET = vol.Schema(
+            {vol.Optional("shadow_power_balance_price"): vol.Any(None, _SHADOW_RANGE)},
+            extra=vol.ALLOW_EXTRA,
+        )
 
         schema = vol.Schema(
             {
@@ -1142,12 +1184,12 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 vol.Required("envelope_export_limit_kw"): _KW_NON_NEG,
                 vol.Required("flex_available_up_kw"): _KW_NON_NEG,
                 vol.Required("flex_available_down_kw"): _KW_NON_NEG,
-                vol.Optional("shadow_energy_price"): vol.Any(None, _PRICE_RANGE),
-                vol.Optional("shadow_load_forecast_price"): vol.Any(None, _PRICE_RANGE),
-                vol.Optional("shadow_solar_forecast_price"): vol.Any(None, _PRICE_RANGE),
-                vol.Optional("shadow_envelope_import_price"): vol.Any(None, _PRICE_RANGE),
-                vol.Optional("shadow_envelope_export_price"): vol.Any(None, _PRICE_RANGE),
-                vol.Required("assets"): list,
+                vol.Optional("shadow_energy_price"): vol.Any(None, _SHADOW_RANGE),
+                vol.Optional("shadow_load_forecast_price"): vol.Any(None, _SHADOW_RANGE),
+                vol.Optional("shadow_solar_forecast_price"): vol.Any(None, _SHADOW_RANGE),
+                vol.Optional("shadow_envelope_import_price"): vol.Any(None, _SHADOW_RANGE),
+                vol.Optional("shadow_envelope_export_price"): vol.Any(None, _SHADOW_RANGE),
+                vol.Required("assets"): [_ASSET],
                 vol.Required("deferrable_loads"): list,
             },
             extra=vol.ALLOW_EXTRA,
