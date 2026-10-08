@@ -139,6 +139,15 @@ class CoordinatorData:
         self.unmapped_entities: list[str] = []
 
 
+def entry_config(entry: ConfigEntry) -> dict[str, Any]:
+    """Return the effective configuration for an entry.
+
+    Setup values live in ``entry.data``; later edits from the options flow
+    live in ``entry.options`` and take precedence (#16).
+    """
+    return {**entry.data, **entry.options}
+
+
 class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
     """Coordinate 5-minute telemetry reads and hourly GitHub pushes."""
 
@@ -151,7 +160,7 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
             update_interval=timedelta(seconds=UPDATE_INTERVAL_SECONDS),
         )
         self.config_entry = entry
-        self._config = entry.data
+        self._config = entry_config(entry)
 
         self.household_id: str = self._config[CONF_HOUSEHOLD_ID]
         self.region: str = self._config[CONF_REGION]
