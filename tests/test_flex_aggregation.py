@@ -153,6 +153,10 @@ def make_coordinator(state_map: dict[str, float | str]):
     coord.hass = FakeHass(state_map)
     coord._flex_derived_logged = False
     coord._power_ratings_logged = False
+    coord._power_rating_live = {}
+    # These tests exercise the post-startup behaviour (#21): outside the
+    # grace period a missing rating is a WARNING.
+    coord._intervals_seen = coord_module.STARTUP_GRACE_INTERVALS + 1
     coord._last_bidirectional_ev_id = None
     return coord
 

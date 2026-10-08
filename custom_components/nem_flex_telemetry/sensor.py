@@ -133,4 +133,7 @@ class NemFlexTelemetrySensor(CoordinatorEntity[NemFlexTelemetryCoordinator], Sen
             "household_id": self.coordinator.household_id,
             "region": self.coordinator.region,
             "buffer_size": self.coordinator.data.buffer_size if self.coordinator.data else 0,
+            "skipped_intervals": (
+                self.coordinator.data.skipped_intervals if self.coordinator.data else 0
+            ),
         }
