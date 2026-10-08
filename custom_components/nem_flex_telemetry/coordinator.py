@@ -74,6 +74,7 @@ from .const import (
     ENTITY_INVERTER_DC_TO_AC,
     GITHUB_REPO,
     RECORDS_PER_PUSH,
+    REQUIRED_ENTITY_FIELDS,
     SCHEMA_VERSION,
     UPDATE_INTERVAL_SECONDS,
     VERSION,
@@ -88,6 +89,11 @@ STORAGE_VERSION = 1
 BUFFER_MAX_RECORDS = 288                 # 24 hours of 5-minute records
 COHORT_REFRESH = timedelta(hours=6)
 STOP_PUSH_TIMEOUT_S = 10.0               # best-effort push on HA stop
+
+# Startup readiness (#21). HAEO and inverter integrations can take a few
+# minutes to publish states after a restart. During this grace period
+# fallbacks and missing inputs are logged at DEBUG only.
+STARTUP_GRACE_INTERVALS = 3
 
 # EV connection state inference constants
 _SOC_DELTA_PLUGGED_IDLE_MAX = 0.5     # % per interval; below this = plugged_idle
@@ -145,6 +151,7 @@ class CoordinatorData:
         self.push_errors: int = 0
         self.cohort_size: int = 0
         self.buffer_size: int = 0
+        self.skipped_intervals: int = 0
         self.unmapped_entities: list[str] = []
 
 
@@ -196,8 +203,14 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # Flex derivation logging gate
         self._flex_derived_logged: bool = False
 
-        # Power-rating health-check logging gate (logged once at first update)
+        # Power-rating health-check (#21): last known live/fallback status per
+        # entity, so changes are logged and startup fallbacks are not reported
+        # as permanent.
+        self._power_rating_live: dict[str, bool] = {}
         self._power_ratings_logged: bool = False
+        self._intervals_seen: int = 0
+        self._skipped_intervals: int = 0
+        self._missing_warned: frozenset[str] = frozenset()
 
         # Context entities discovered at first update
         self._context_entities: dict[str, str | None] = {}
@@ -295,14 +308,14 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return default_kw, False
 
     def _log_power_rating_health_check(self) -> None:
-        """Log a one-time summary of which power-rating entities are live.
+        """Log which power-rating entities are live and which use fallbacks.
 
-        Emits a single INFO line per power-rating entity at first update,
-        showing whether the value came from the live HA entity or fell back
-        to the compile-time default in const.py.
+        Runs every interval but only logs changes. During the startup grace
+        period a fallback is logged at DEBUG, because the entity may simply
+        not have published yet (#21). After the grace period a remaining
+        fallback is logged once as a WARNING, and a later recovery is logged
+        at INFO.
         """
-        if self._power_ratings_logged:
-            return
         checks = (
             ("battery max charge", ENTITY_BATTERY_MAX_CHARGE,
              DEFAULT_BATTERY_MAX_CHARGE_KW),
@@ -317,28 +330,47 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
             ("DCEV charger DC->AC", ENTITY_DCEV_DC_TO_AC,
              DEFAULT_DCEV_DC_TO_AC_KW),
         )
+        in_grace = self._intervals_seen <= STARTUP_GRACE_INTERVALS
         live_count = 0
-        fallback_count = 0
         for label, entity_id, default_kw in checks:
             value, is_live = self._resolve_number_kw(entity_id, default_kw)
+            live_count += is_live
+            previous = self._power_rating_live.get(entity_id)
             if is_live:
-                live_count += 1
-                _LOGGER.info(
-                    "Power-rating health-check: %s -> %.1f kW (live from %s)",
-                    label, value, entity_id,
+                if previous is not True:
+                    _LOGGER.info(
+                        "Power-rating health-check: %s -> %.1f kW (live from %s)",
+                        label, value, entity_id,
+                    )
+                self._power_rating_live[entity_id] = True
+            elif in_grace:
+                _LOGGER.debug(
+                    "Power-rating health-check: %s not ready yet (%s); "
+                    "using %.1f kW until it publishes",
+                    label, entity_id, value,
                 )
-            else:
-                fallback_count += 1
+            elif previous is not False:
                 _LOGGER.warning(
                     "Power-rating health-check: %s -> %.1f kW "
                     "(FALLBACK; %s missing or unavailable)",
                     label, value, entity_id,
                 )
-        _LOGGER.info(
-            "Power-rating health-check complete: %d live, %d fallback",
-            live_count, fallback_count,
-        )
-        self._power_ratings_logged = True
+                self._power_rating_live[entity_id] = False
+        if not self._power_ratings_logged and (not in_grace or live_count == len(checks)):
+            _LOGGER.info(
+                "Power-rating health-check complete: %d live, %d fallback",
+                live_count, len(checks) - live_count,
+            )
+            self._power_ratings_logged = True
+
+    def _missing_required_inputs(self) -> list[str]:
+        """Return required entity fields whose entity has no usable state."""
+        missing: list[str] = []
+        for field in REQUIRED_ENTITY_FIELDS:
+            entity_id = self._config.get(field)
+            if _read_state_float_or_none(self.hass, entity_id) is None:
+                missing.append(f"{field}={entity_id or 'not mapped'}")
+        return missing
 
     def _battery_asset_flex(
         self, battery_setpoint_kw: float
@@ -797,9 +829,32 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
             await self._async_discover_context()
             await self._async_run_global_sweep()
 
-        # One-time power-rating health-check (logs which number.* sensors
-        # are live vs falling back to const.py defaults).
+        self._intervals_seen += 1
+
+        # Power-rating health-check: logs live vs fallback status changes.
         self._log_power_rating_health_check()
+
+        # Do not publish an interval built from unavailable inputs: the
+        # readers fall back to 0.0, which looks like real data (#21).
+        missing = self._missing_required_inputs()
+        if missing:
+            self._skipped_intervals += 1
+            if self._intervals_seen <= STARTUP_GRACE_INTERVALS:
+                _LOGGER.debug("Skipping interval; inputs not ready: %s", ", ".join(missing))
+            elif frozenset(missing) != self._missing_warned:
+                _LOGGER.warning(
+                    "Skipping telemetry interval: required input(s) unavailable: %s. "
+                    "Check the entity mapping in the integration options.",
+                    ", ".join(missing),
+                )
+                # Only remember what was actually reported, so inputs missing
+                # during the grace period still warn once it ends.
+                self._missing_warned = frozenset(missing)
+            self._data.skipped_intervals = self._skipped_intervals
+            return self._data
+        if self._missing_warned:
+            _LOGGER.info("Required inputs available again; resuming telemetry")
+            self._missing_warned = frozenset()
 
         record = self._build_record()
 
