@@ -92,6 +92,10 @@
           "ev1_capacity_kwh": "EV 1 battery capacity (kWh)",
           "ev2_capacity_kwh": "EV 2 battery capacity (kWh)"
         }
+      },
+      "no_push_access": {
+        "title": "GitHub account needs write access",
+        "description": "Signed in as **{github_login}**, but this account cannot write to `{repo}` yet. Telemetry is pushed straight to that repository, so the maintainer must invite your account first.\n\nOpen an issue at {issues_url} titled `[Access request] {github_login}`, then accept the invitation from GitHub.\n\nYou can continue setup now. Records are kept for up to 24 hours and pushed once access is granted."
       }
     },
     "progress": {
@@ -142,6 +146,12 @@
     },
     "error": {
       "entity_required": "This field is required."
+    }
+  },
+  "issues": {
+    "no_push_access": {
+      "title": "NEM Flex Telemetry cannot push data",
+      "description": "Your GitHub account does not have write access to `{repo}`, so records are being kept locally and retried each hour (up to 24 hours). Ask the maintainer to invite your account, then accept the invitation from GitHub. This message clears after the next successful push."
     }
   }
 }

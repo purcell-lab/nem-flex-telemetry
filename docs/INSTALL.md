@@ -149,6 +149,16 @@ After revocation, the integration will detect the invalid token on the next push
 - Check that you entered the code on **https://github.com/login/device** (not github.com/login).
 - Codes expire after 15 minutes. If you see "code expired", click "Try again" in the config flow.
 
+### Push fails with HTTP 404
+
+GitHub returns 404, not 403, when your account can read the repository but cannot write to it. Records are pushed straight to `purcell-lab/nem-flex-telemetry`, so the maintainer must invite your GitHub account first.
+
+1. [Open an issue](https://github.com/purcell-lab/nem-flex-telemetry/issues/new) titled `[Access request] <your GitHub username>`.
+2. Accept the invitation from your GitHub notifications or email.
+3. Wait for the next hourly push, or run the manual push service (Step 8).
+
+While access is missing, the integration keeps up to 24 hours of records, shows a repair under Settings > System > Repairs, and does not retry the failed push within the same hour. Setup (Step 3) also checks write access and warns you before you continue. The repair clears after the first successful push.
+
 ### Shadow price sensors are null in my records
 
 Shadow prices require HAEO v0.3 or later and are optional. Null is valid. If your HAEO instance is older, upgrade HAEO and the sensors will be picked up automatically on the next coordinator startup (no reconfiguration needed, thanks to the global sweep).

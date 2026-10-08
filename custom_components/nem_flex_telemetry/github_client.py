@@ -78,6 +78,15 @@ class GitHubPushError(Exception):
     """Raised when a push to GitHub fails after all retries."""
 
 
+class PushPermissionError(GitHubPushError):
+    """The token is valid but cannot write to the telemetry repository.
+
+    GitHub returns 404 (not 403) from the Contents API when the account has
+    read access only, so a 404 on PUT means "no write access" (#14).
+    Retrying cannot succeed.
+    """
+
+
 class TokenInvalidError(Exception):
     """Raised when the stored token is rejected by GitHub (HTTP 401).
 
@@ -177,6 +186,27 @@ class NemFlexGitHubClient:
                 "Re-authentication required."
             )
         _LOGGER.debug("Token verified for GitHub user: %s", actual_login)
+
+    async def has_push_access(self) -> bool | None:
+        """Return whether the token can write to the telemetry repository.
+
+        Reads ``permissions.push`` from ``GET /repos/{repo}``. Returns None if
+        GitHub could not be reached, so callers can treat it as unknown.
+        """
+        try:
+            async with aiohttp.ClientSession(headers=self._headers) as session:
+                async with session.get(self._url(f"/repos/{self._repo_name}")) as resp:
+                    if resp.status != 200:
+                        _LOGGER.debug("Repo permission check returned HTTP %s", resp.status)
+                        return None
+                    data: dict[str, Any] = await resp.json()
+        except Exception as exc:  # pylint: disable=broad-except
+            _LOGGER.debug("Repo permission check failed: %s", exc)
+            return None
+        permissions = data.get("permissions")
+        if not isinstance(permissions, dict):
+            return None
+        return bool(permissions.get("push"))
 
     async def append_records(
         self,
@@ -298,13 +328,20 @@ class NemFlexGitHubClient:
                         raise TokenInvalidError(
                             "GitHub rejected the stored token (HTTP 401). Re-authentication required."
                         )
+                    if put_resp.status in (403, 404):
+                        raise PushPermissionError(
+                            f"Your GitHub account does not have write access to "
+                            f"{self._repo_name} (HTTP {put_resp.status} on {file_path}). "
+                            "See https://github.com/purcell-lab/nem-flex-telemetry/blob/main/"
+                            "docs/INSTALL.md#push-fails-with-http-404"
+                        )
                     text = await put_resp.text()
                     raise GitHubPushError(
                         f"GitHub PUT {file_path} returned HTTP {put_resp.status}: {text}"
                     )
 
-            except TokenInvalidError:
-                # Never retry a 401; bubble up immediately
+            except (TokenInvalidError, PushPermissionError):
+                # Never retry a 401 or a permission error; bubble up immediately
                 raise
 
             except Exception as exc:  # pylint: disable=broad-except

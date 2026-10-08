@@ -62,6 +62,7 @@ from .const import (
     CONF_TOKEN,
     DEFAULT_ENTITY_MAPPINGS,
     DOMAIN,
+    GITHUB_REPO,
     ENTITY_SELECTOR_DOMAINS,
     REQUIRED_ENTITY_FIELDS,
     NEM_REGIONS,
@@ -75,6 +76,7 @@ from .device_flow import (
     DeviceFlowSession,
     fetch_authenticated_user,
 )
+from .github_client import NemFlexGitHubClient
 from .discovery import (
     build_entity_map,
     classify_discovery_result,
@@ -292,7 +294,12 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             user_info = await fetch_authenticated_user(token)
             self._data[CONF_TOKEN] = token
             self._data[CONF_GITHUB_LOGIN] = user_info.get("login", "")
-            self._poll_next_step = "identity"
+            # Check write access now, not at the first hourly push (#14).
+            # None means GitHub could not say; carry on as before.
+            can_push = await NemFlexGitHubClient(
+                token=token, repo_name=GITHUB_REPO
+            ).has_push_access()
+            self._poll_next_step = "identity" if can_push is not False else "no_push_access"
         except DeviceFlowExpired:
             self._auth_error = "device_flow_expired"
             self._poll_next_step = "auth_error"
@@ -305,6 +312,26 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         except DeviceFlowNetworkError as exc:
             self._auth_error = str(exc)
             self._poll_next_step = "auth_error"
+
+    async def async_step_no_push_access(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Explain that the account cannot write to the telemetry repo (#14).
+
+        The user can continue: records are buffered and pushed once the
+        maintainer grants access, and a repair issue is raised meanwhile.
+        """
+        if user_input is not None:
+            return await self.async_step_identity()
+        return self.async_show_form(
+            step_id="no_push_access",
+            data_schema=vol.Schema({}),
+            description_placeholders={
+                "github_login": self._data.get(CONF_GITHUB_LOGIN, ""),
+                "repo": GITHUB_REPO,
+                "issues_url": "https://github.com/purcell-lab/nem-flex-telemetry/issues/new",
+            },
+        )
 
     # -----------------------------------------------------------------------
     # Step 4: Household identity
