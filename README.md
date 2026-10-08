@@ -87,6 +87,8 @@ Empty in v0.3. Reserved for v0.4 (hot water services, pool pumps, etc.).
 
 **Prerequisites:** Home Assistant running with [HAEO](https://github.com/hass-energy/haeo) configured.
 
+**Write access:** the integration pushes records directly to this repository, so your GitHub account needs write access. Before you install, [open an issue](https://github.com/purcell-lab/nem-flex-telemetry/issues/new) titled `[Access request] <your GitHub username>` and accept the invitation when it arrives. Setup checks this and tells you if access is missing.
+
 ### Step 1: Install via HACS, then click through GitHub Device Flow when prompted. No tokens to copy.
 
 In HACS, add this repo as a custom Integration source: `https://github.com/purcell-lab/nem-flex-telemetry`. Install, restart HA, then go to Settings > Devices and Services > Add Integration > NEM Flex Telemetry.

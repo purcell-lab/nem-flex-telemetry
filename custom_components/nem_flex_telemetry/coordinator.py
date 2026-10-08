@@ -80,7 +80,16 @@ from .const import (
     VERSION,
 )
 from .discovery import discover_context_entities, run_global_sweep
-from .github_client import GitHubPushError, NemFlexGitHubClient, TokenInvalidError
+from homeassistant.helpers import issue_registry as ir
+
+from .github_client import (
+    GitHubPushError,
+    NemFlexGitHubClient,
+    PushPermissionError,
+    TokenInvalidError,
+)
+
+ISSUE_NO_PUSH_ACCESS = "no_push_access"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -195,6 +204,7 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # Lazy-initialised GitHub client
         self._github_client: NemFlexGitHubClient | None = None
         self._push_error_count: int = 0
+        self._no_push_access: bool = False
         self._records_pushed_today: int = 0
         # Local (HA timezone) date the daily counter belongs to (#19).
         self._push_day: str | None = None
@@ -1062,6 +1072,10 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
             count = len(records_to_push)
             self._records_pushed_today += count
             self._data.last_push_time = datetime.now(tz=UTC)
+            if self._no_push_access:
+                self._no_push_access = False
+                ir.async_delete_issue(self.hass, DOMAIN, ISSUE_NO_PUSH_ACCESS)
+                _LOGGER.info("Write access to %s confirmed; pushes resumed", GITHUB_REPO)
             _LOGGER.info(
                 "Pushed %d records for household %s (schema v%s, v%s)",
                 count,
@@ -1080,6 +1094,29 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 exc,
             )
             self.config_entry.async_start_reauth(self.hass)
+
+        except PushPermissionError as exc:
+            self._push_error_count += 1
+            for r in reversed(records_to_push):
+                self._buffer.appendleft(r)
+            if not self._no_push_access:
+                # Log and raise a repair once; keep buffering until access is
+                # granted (#14). Up to 24 hours of records are kept.
+                self._no_push_access = True
+                _LOGGER.error("%s Records are kept and retried each hour.", exc)
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    ISSUE_NO_PUSH_ACCESS,
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.ERROR,
+                    translation_key=ISSUE_NO_PUSH_ACCESS,
+                    translation_placeholders={"repo": GITHUB_REPO},
+                    learn_more_url=(
+                        "https://github.com/purcell-lab/nem-flex-telemetry/blob/main/"
+                        "docs/INSTALL.md#push-fails-with-http-404"
+                    ),
+                )
 
         except GitHubPushError as exc:
             self._push_error_count += 1
