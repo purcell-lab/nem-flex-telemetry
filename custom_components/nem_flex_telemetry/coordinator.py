@@ -5,7 +5,8 @@ Responsibilities:
 - Build and validate the schema v2.0 telemetry record (18 flat fields + assets[] + deferrable_loads[])
 - Derive flex headroom from battery limits when HAEO does not expose them directly
 - Infer per-EV connection state and power_flow_capability (not from any entity)
-- Track the last_bidirectional_ev_id across intervals (sticky)
+- Build asset records for the configured batteries and EVs only (#15)
+- Allocate the configured bidirectional chargers to EVs (sticky)
 - Re-run global entity sweep on every coordinator startup
 - Buffer records in memory
 - Push the buffer to GitHub on the hour (every 12 records = 1 hour of data)
@@ -34,12 +35,13 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
+from .assets import configured_assets
 from .const import (
-    ASSET_DEFAULTS,
+    ASSET_KIND_BATTERY,
+    ASSET_KIND_EV,
     SHADOW_PRICE_MAX,
     SHADOW_PRICE_MIN,
-    CONF_EV1_CAPACITY_KWH,
-    CONF_EV2_CAPACITY_KWH,
+    CONF_BIDIRECTIONAL_CHARGERS,
     CONF_ENTITY_ENVELOPE_EXPORT,
     CONF_ENTITY_ENVELOPE_IMPORT,
     CONF_ENTITY_FLEX_DOWN,
@@ -55,13 +57,13 @@ from .const import (
     CONF_ENTITY_SOLAR,
     CONF_ENTITY_TOTAL_LOAD,
     CONF_GITHUB_LOGIN,
-    CONF_HOME_BATTERY_CAPACITY_KWH,
     CONF_HOUSEHOLD_ID,
     CONF_POSTCODE_PREFIX,
     CONF_REGION,
     CONF_TOKEN,
     DEFAULT_BATTERY_MAX_CHARGE_KW,
     DEFAULT_BATTERY_MAX_DISCHARGE_KW,
+    DEFAULT_BIDIRECTIONAL_CHARGERS,
     DEFAULT_DCEV_AC_TO_DC_KW,
     DEFAULT_DCEV_DC_TO_AC_KW,
     DEFAULT_EV_MAX_CHARGE_KW,
@@ -256,19 +258,20 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # {asset_id: last_discharge_utc}
         self._last_discharge_time: dict[str, datetime] = {}
 
-        # Which EV was last confirmed on the bidirectional charger
-        self._last_bidirectional_ev_id: str | None = None
+        # Configured batteries and EVs (#15). Entries from before #15 get the
+        # reference home_battery / ev1 / ev2 trio (see assets.legacy_assets).
+        self._assets: list[dict[str, Any]] = configured_assets(self._config)
+        # Assets skipped because their SOC entity does not exist, so the
+        # warning is logged once rather than every interval.
+        self._missing_assets: set[str] = set()
 
-        # Asset capacity overrides from config (set in async_step_assets)
-        self._asset_capacity: dict[str, float] = {}
-        if CONF_HOME_BATTERY_CAPACITY_KWH in self._config:
-            self._asset_capacity["home_battery"] = float(
-                self._config[CONF_HOME_BATTERY_CAPACITY_KWH]
-            )
-        if CONF_EV1_CAPACITY_KWH in self._config:
-            self._asset_capacity["ev1"] = float(self._config[CONF_EV1_CAPACITY_KWH])
-        if CONF_EV2_CAPACITY_KWH in self._config:
-            self._asset_capacity["ev2"] = float(self._config[CONF_EV2_CAPACITY_KWH])
+        # Bidirectional (V2G) chargers shared by the EVs marked
+        # bidirectional_capable, and which EVs currently hold one (sticky,
+        # oldest first). The reference install has one shared DCEV charger.
+        self._bidirectional_chargers: int = int(
+            self._config.get(CONF_BIDIRECTIONAL_CHARGERS, DEFAULT_BIDIRECTIONAL_CHARGERS)
+        )
+        self._bidirectional_holders: list[str] = []
 
     def _get_or_create_github_client(self) -> NemFlexGitHubClient:
         """Return the GitHub client, creating it if needed."""
@@ -429,16 +432,23 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         ev_setpoint_kw: float,
         connection_state: str,
         power_flow_capability: str,
+        bidirectional_capable: bool = True,
     ) -> tuple[float, float]:
-        """Per-asset EV flex headroom, gated by DCEV charger allocation.
+        """Per-asset EV flex headroom, gated by bidirectional charger allocation.
 
-        Allocation rule: the household has ONE DCEV bidirectional charger shared
-        across both EVs. Only the EV currently allocated the charger contributes
-        flex; the other gets (0, 0). Allocation rule (sticky):
-          - If self._last_bidirectional_ev_id is set and matches asset_id, this
-            EV holds the charger.
-          - Else the first plugged EV in iteration order wins. _build_record
-            iterates ASSET_DEFAULTS deterministically so this is stable.
+        Allocation rule: the household has ``_bidirectional_chargers`` DCEV
+        bidirectional chargers shared by the EVs marked bidirectional_capable
+        (the reference install: one charger, two EVs). Only an EV holding a
+        charger contributes flex; a capable EV without one gets (0, 0).
+        Allocation is sticky:
+          - An EV in self._bidirectional_holders keeps its charger.
+          - Else a plugged EV claims a free charger, in configured asset order
+            so this is stable.
+          - An unplugged or driving EV releases its charger.
+
+        An EV that cannot use a bidirectional charger (or a household with
+        none) is on its own charger: charge headroom up to
+        DEFAULT_EV_MAX_CHARGE_KW, no V2G.
 
         Connection state gating:
           - 'unplugged' / 'driving' -> (0, 0): EV not present.
@@ -450,17 +460,21 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         Returns (available_up_kw, available_down_kw), both >= 0.
         """
         if connection_state in ("unplugged", "driving"):
+            # Not at home: free its bidirectional charger for another EV.
+            if asset_id in self._bidirectional_holders:
+                self._bidirectional_holders.remove(asset_id)
             return 0.0, 0.0
 
-        # DCEV allocation: only the sticky owner gets the charger.
-        if (
-            self._last_bidirectional_ev_id is not None
-            and self._last_bidirectional_ev_id != asset_id
-        ):
-            return 0.0, 0.0
-        if self._last_bidirectional_ev_id is None:
-            # No sticky owner yet. Claim it for the first plugged EV.
-            self._last_bidirectional_ev_id = asset_id
+        if not bidirectional_capable or self._bidirectional_chargers <= 0:
+            current_charge_rate = max(0.0, ev_setpoint_kw)
+            return max(0.0, DEFAULT_EV_MAX_CHARGE_KW - current_charge_rate), 0.0
+
+        # DCEV allocation: only a sticky holder gets a charger.
+        if asset_id not in self._bidirectional_holders:
+            if len(self._bidirectional_holders) >= self._bidirectional_chargers:
+                return 0.0, 0.0
+            # A charger is free. Claim it for this plugged EV.
+            self._bidirectional_holders.append(asset_id)
 
         max_charge = self._read_dcev_ac_to_dc()
         max_discharge = self._read_dcev_dc_to_ac()
@@ -557,9 +571,18 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return "plugged_idle", self._get_power_flow_capability(asset_id, "plugged_idle")
 
     def _record_discharge(self, asset_id: str, now: datetime) -> None:
-        """Record that this EV was observed discharging (bidirectional charger)."""
+        """Record that this EV was observed discharging (bidirectional charger).
+
+        A discharging EV is on a bidirectional charger, so it takes one; when
+        all are held, the longest-held one is handed over.
+        """
         self._last_discharge_time[asset_id] = now
-        self._last_bidirectional_ev_id = asset_id
+        if self._bidirectional_chargers <= 0:
+            return
+        if asset_id in self._bidirectional_holders:
+            self._bidirectional_holders.remove(asset_id)
+        self._bidirectional_holders.append(asset_id)
+        del self._bidirectional_holders[: -self._bidirectional_chargers]
 
     def _get_power_flow_capability(self, asset_id: str, connection_state: str) -> str:
         """Determine power_flow_capability based on sticky bidirectional tracking."""
@@ -593,17 +616,14 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """Build a single asset record for one interval.
 
         Reads entity states, infers EV connection state, and updates SOC history.
+        ``asset_spec`` is one entry of the configured asset list (#15).
         """
         kind: str = asset_spec["kind"]
-        bidirectional_capable: bool = asset_spec["bidirectional_capable"]
+        bidirectional_capable: bool = bool(asset_spec.get("bidirectional_capable", True))
         soc_entity: str | None = asset_spec.get("soc_entity")
         setpoint_entity: str | None = asset_spec.get("setpoint_entity")
         shadow_entity: str | None = asset_spec.get("shadow_entity")
-
-        # Capacity: config override takes precedence over spec default
-        capacity_kwh: float = self._asset_capacity.get(
-            asset_id, asset_spec.get("capacity_kwh", 0.0)
-        )
+        capacity_kwh: float = float(asset_spec.get("capacity_kwh") or 0.0)
 
         # Read entities
         soc_pct = _read_state_float(self.hass, soc_entity, fallback=0.0) or 0.0
@@ -613,19 +633,20 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         # Derive per-asset flex headroom.
         # - Battery: clipped to hybrid inverter rating (PV + battery share AC side).
-        # - EV: gated by DCEV charger allocation (one charger, two EVs) and
-        #   connection_state. Must compute connection_state first.
+        # - EV: gated by bidirectional charger allocation and connection_state.
+        #   Must compute connection_state first.
         connection_state: str | None = None
         power_flow_capability: str | None = None
 
-        if kind == "stationary_battery":
+        if kind == ASSET_KIND_BATTERY:
             available_up, available_down = self._battery_asset_flex(sp)
-        elif kind == "ev":
+        elif kind == ASSET_KIND_EV:
             connection_state, power_flow_capability = self._infer_ev_connection_state(
                 asset_id, shadow, setpoint_kw, soc_pct, now
             )
             available_up, available_down = self._ev_asset_flex(
-                asset_id, sp, connection_state, power_flow_capability
+                asset_id, sp, connection_state, power_flow_capability,
+                bidirectional_capable=bidirectional_capable,
             )
         else:
             # Unknown asset kind: fall back to spec-declared limits, no clip.
@@ -647,14 +668,14 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         }
 
         # EV-specific fields
-        if kind == "ev":
+        if kind == ASSET_KIND_EV:
             record["connection_state"] = connection_state
             record["power_flow_capability"] = power_flow_capability
             record["departure_target_pct"] = None
             record["departure_time_utc"] = None
 
         # Update SOC history for next interval's delta calculation
-        if kind == "ev":
+        if kind == ASSET_KIND_EV:
             self._ev_prev_soc[asset_id] = (soc_pct, now)
 
         return record
@@ -739,9 +760,13 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         naive_baseline_method = "subtraction"
 
         # Build asset records first: per-asset flex computation depends on
-        # connection_state inference and DCEV sticky allocation.
+        # connection_state inference and DCEV sticky allocation. Only the
+        # configured assets are published, and only while they exist (#15).
         assets: list[dict[str, Any]] = []
-        for asset_id, asset_spec in ASSET_DEFAULTS.items():
+        for asset_spec in self._assets:
+            asset_id = asset_spec["asset_id"]
+            if not self._asset_present(asset_spec):
+                continue
             try:
                 asset_record = self._build_asset_record(asset_id, asset_spec, now_utc)
                 assets.append(asset_record)
@@ -823,9 +848,44 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         }
         return record
 
+    def _asset_present(self, asset_spec: dict[str, Any]) -> bool:
+        """Return whether an asset's SOC entity exists (#15).
+
+        A missing asset is left out of the record rather than published with
+        a zero SOC. It is logged once (at DEBUG during the startup grace
+        period, when the entity may simply not be registered yet), and its
+        return is logged at INFO.
+        """
+        asset_id = asset_spec["asset_id"]
+        soc_entity = asset_spec.get("soc_entity")
+        if soc_entity and self.hass.states.get(soc_entity) is not None:
+            if asset_id in self._missing_assets:
+                self._missing_assets.discard(asset_id)
+                _LOGGER.info("Asset %s is available again (%s)", asset_id, soc_entity)
+            return True
+        if self._intervals_seen <= STARTUP_GRACE_INTERVALS:
+            _LOGGER.debug(
+                "Asset %s not ready yet (%s); leaving it out of this interval",
+                asset_id, soc_entity or "no SOC entity mapped",
+            )
+        elif asset_id not in self._missing_assets:
+            self._missing_assets.add(asset_id)
+            _LOGGER.warning(
+                "Asset %s left out of telemetry: SOC entity %s does not exist. "
+                "Check the batteries and EVs in the integration options.",
+                asset_id, soc_entity or "(not mapped)",
+            )
+        return False
+
     async def _async_run_global_sweep(self) -> None:
         """Run the global entity sweep and log unmapped entities."""
-        unmapped = run_global_sweep(self.hass)
+        asset_entities = {
+            a[key]
+            for a in self._assets
+            for key in ("soc_entity", "setpoint_entity", "shadow_entity")
+            if a.get(key)
+        }
+        unmapped = run_global_sweep(self.hass, extra_mapped=asset_entities)
         self._last_sweep_unmapped = unmapped
         self._data.unmapped_entities = unmapped
         if unmapped:

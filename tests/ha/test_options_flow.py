@@ -58,22 +58,22 @@ def _all_mapped() -> dict[str, str]:
 
 
 async def test_options_save_writes_options(hass: HomeAssistant) -> None:
-    """Saving writes every entity field and capacities to entry.options."""
-    entry = _entry(hass)
+    """Saving writes every entity field and the asset list to entry.options."""
+    entry = _entry(hass, home_battery_capacity_kwh=33.14)
     result = await hass.config_entries.options.async_init(entry.entry_id)
     user_input = {
         **_all_mapped(),
         CONF_ENTITY_TOTAL_LOAD: "sensor.house_load",
-        "home_battery_capacity_kwh": 33.14,
-        "ev1_capacity_kwh": 60.0,
-        "ev2_capacity_kwh": 0.1,
     }
     result = await hass.config_entries.options.async_configure(
         result["flow_id"], user_input=user_input
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_ENTITY_TOTAL_LOAD] == "sensor.house_load"
-    assert entry.options["home_battery_capacity_kwh"] == 33.14
+    # Without "Edit batteries and EVs" the asset list is carried over (#15).
+    battery = entry.options["assets"][0]
+    assert battery["asset_id"] == "home_battery"
+    assert battery["capacity_kwh"] == 33.14
     # entry.data is untouched; the setup record is preserved.
     assert entry.data[CONF_ENTITY_TOTAL_LOAD] == "sensor.wrong_load"
 

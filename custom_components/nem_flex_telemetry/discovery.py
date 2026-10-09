@@ -40,6 +40,10 @@ run_global_sweep() returns:
         by any named mapping. These are surfaced in the config flow for manual
         association.
 
+discover_asset_counts() / discover_asset_entities() (#15):
+    Pre-fill the asset steps. ASSET_DEFAULTS and the HAEO naming convention
+    are hints only; nothing is assumed to exist until its entity is found.
+
 discover_context_entities() returns:
 
     context: {context_key: entity_id | None}
@@ -53,11 +57,16 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 
+from .assets import asset_entity_hints, asset_id_for
 from .const import (
     ASSET_DEFAULTS,
+    ASSET_KIND_BATTERY,
+    ASSET_KIND_EV,
     CONF_ENTITY_FLEX_DOWN,
     CONF_ENTITY_FLEX_UP,
     CONTEXT_ENTITIES,
+    ENTITY_DCEV_AC_TO_DC,
+    MAX_ASSETS_PER_KIND,
     DEFAULT_HAEO_ENTITIES,
     GLOBAL_SWEEP_PATTERNS,
     REGION_PD7DAY_ENTITY,
@@ -142,6 +151,7 @@ async def discover_haeo_entities(
 def run_global_sweep(
     hass: HomeAssistant,
     already_mapped: set[str] | None = None,
+    extra_mapped: set[str] | None = None,
 ) -> list[str]:
     """Sweep all HA states for entities matching GLOBAL_SWEEP_PATTERNS.
 
@@ -157,6 +167,8 @@ def run_global_sweep(
                         or asset. If None, defaults to the union of all primary
                         and fallback entities from DEFAULT_HAEO_ENTITIES plus
                         ASSET_DEFAULTS entity references.
+        extra_mapped: Further entity_ids to treat as mapped, e.g. the
+                      entities of the configured assets.
 
     Returns:
         Sorted list of entity_ids that matched a sweep pattern but are not
@@ -164,6 +176,8 @@ def run_global_sweep(
     """
     if already_mapped is None:
         already_mapped = _build_known_entity_set()
+    if extra_mapped:
+        already_mapped = already_mapped | extra_mapped
 
     matched: list[str] = []
     for state in hass.states.async_all():
@@ -203,6 +217,56 @@ def _build_known_entity_set() -> set[str]:
             if val:
                 known.add(val)
     return known
+
+
+def discover_asset_entities(hass: HomeAssistant, asset_id: str) -> dict[str, Any]:
+    """Return the hinted entities for an asset that exist on this instance.
+
+    Keys are soc_entity / setpoint_entity / shadow_entity (only those found),
+    plus capacity_kwh when the asset is in ASSET_DEFAULTS and its SOC entity
+    exists, so the reference install gets its usual capacities pre-filled.
+    """
+    hints = asset_entity_hints(asset_id)
+    found: dict[str, Any] = {
+        key: hints[key]
+        for key in ("soc_entity", "setpoint_entity", "shadow_entity")
+        if hints.get(key) and hass.states.get(hints[key]) is not None
+    }
+    if "soc_entity" in found and hints.get("capacity_kwh"):
+        found["capacity_kwh"] = hints["capacity_kwh"]
+    return found
+
+
+def discover_asset_counts(hass: HomeAssistant) -> tuple[int, int, int]:
+    """Suggest (home batteries, EVs, bidirectional chargers) for this instance.
+
+    An asset counts when its hinted SOC entity exists, scanning
+    home_battery, home_battery_2, ... and ev1, ev2, ... in order until one
+    is missing. One bidirectional charger is suggested when an EV was found
+    and the DCEV charger rating entity exists.
+    """
+    counts: dict[str, int] = {}
+    for kind in (ASSET_KIND_BATTERY, ASSET_KIND_EV):
+        n = 0
+        while n < MAX_ASSETS_PER_KIND:
+            soc = asset_entity_hints(asset_id_for(kind, n + 1)).get("soc_entity")
+            if not soc or hass.states.get(soc) is None:
+                break
+            n += 1
+        counts[kind] = n
+    chargers = (
+        1
+        if counts[ASSET_KIND_EV] and hass.states.get(ENTITY_DCEV_AC_TO_DC) is not None
+        else 0
+    )
+    _LOGGER.debug(
+        "Asset discovery: %d home batter%s, %d EV(s), %d bidirectional charger(s)",
+        counts[ASSET_KIND_BATTERY],
+        "y" if counts[ASSET_KIND_BATTERY] == 1 else "ies",
+        counts[ASSET_KIND_EV],
+        chargers,
+    )
+    return counts[ASSET_KIND_BATTERY], counts[ASSET_KIND_EV], chargers
 
 
 async def discover_context_entities(

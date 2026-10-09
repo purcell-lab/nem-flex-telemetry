@@ -46,10 +46,45 @@ SOURCES: tuple[str, ...] = (SOURCE_HAEO, SOURCE_NIMBUS)
 NIMBUS_TELEMETRY_ENTITY = "sensor.nimbus_flex_telemetry"
 NIMBUS_FLEX_SWITCH = "switch.nimbus_solver_flex_signals_enabled"
 
-# Asset capacity config keys (asked in async_step_assets)
+# Asset list (#15). CONF_ASSETS holds one dict per configured battery or EV:
+#   {"asset_id", "kind", "capacity_kwh", "bidirectional_capable",
+#    "soc_entity", "setpoint_entity", "shadow_entity"}
+# CONF_BIDIRECTIONAL_CHARGERS is how many bidirectional (V2G) chargers the
+# EVs marked bidirectional_capable share.
+CONF_ASSETS = "assets"
+CONF_BIDIRECTIONAL_CHARGERS = "bidirectional_chargers"
+CONF_HOME_BATTERY_COUNT = "home_battery_count"
+CONF_EV_COUNT = "ev_count"
+CONF_EDIT_ASSETS = "edit_assets"
+
+# Per-asset form fields (asked once per asset in the asset_* steps)
+CONF_ASSET_CAPACITY_KWH = "capacity_kwh"
+CONF_ASSET_SOC_ENTITY = "soc_entity"
+CONF_ASSET_SETPOINT_ENTITY = "setpoint_entity"
+CONF_ASSET_SHADOW_ENTITY = "shadow_entity"
+CONF_ASSET_BIDIRECTIONAL = "bidirectional_capable"
+
+ASSET_KIND_BATTERY = "stationary_battery"
+ASSET_KIND_EV = "ev"
+MAX_ASSETS_PER_KIND = 4
+MAX_BIDIRECTIONAL_CHARGERS = 4
+# Entries created before #15 had exactly one shared DCEV charger.
+DEFAULT_BIDIRECTIONAL_CHARGERS = 1
+
+# Legacy (config entry v3) capacity keys for the fixed home_battery / ev1 /
+# ev2 trio. Read only by the v3 -> v4 migration and the legacy fallback.
 CONF_HOME_BATTERY_CAPACITY_KWH = "home_battery_capacity_kwh"
 CONF_EV1_CAPACITY_KWH = "ev1_capacity_kwh"
 CONF_EV2_CAPACITY_KWH = "ev2_capacity_kwh"
+LEGACY_CAPACITY_KEYS: dict[str, str] = {
+    "home_battery": CONF_HOME_BATTERY_CAPACITY_KWH,
+    "ev1": CONF_EV1_CAPACITY_KWH,
+    "ev2": CONF_EV2_CAPACITY_KWH,
+}
+# The v3 form forced capacity >= 0.1 kWh, so households without a second EV
+# (or without a battery) entered 0.1 to get through setup. Such an asset is a
+# placeholder, not a real one.
+PLACEHOLDER_CAPACITY_KWH = 0.1
 
 # ---------------------------------------------------------------------------
 # Entity mapping config keys (top-level / HAEO)
@@ -296,9 +331,11 @@ DEFAULT_HAEO_ENTITIES: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 # ASSET_DEFAULTS
 #
-# Per-asset entity mappings for Mark Purcell's install.
-# Each asset has kind, bidirectional_capable, and entity sources.
-# EV assets include connection_state inference metadata.
+# Discovery hints only (#15): the entity names and capacities of Mark
+# Purcell's install. The config flow pre-fills an asset step from these when
+# the hinted entity exists, and the v3 -> v4 migration uses them to keep the
+# reference install unchanged. The coordinator reads the configured asset
+# list (CONF_ASSETS), never this dict.
 # ---------------------------------------------------------------------------
 ASSET_DEFAULTS: dict[str, dict] = {
     "home_battery": {

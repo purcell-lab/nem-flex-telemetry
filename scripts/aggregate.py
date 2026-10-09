@@ -73,6 +73,12 @@ INTERVAL_SECONDS = 300
 # interval: beyond the market-price window, so a penalty-driven dual (#30).
 SHADOW_BOUND_THRESHOLD = 2.0
 
+# Before #15 the setup form forced every asset capacity to at least 0.1 kWh,
+# so households without a second EV (or without a battery) entered 0.1 and
+# published a phantom asset every interval. Asset records at or below this
+# capacity are placeholders and are left out of the asset views.
+PLACEHOLDER_CAPACITY_KWH = 0.1
+
 # Publisher household-ID aliasing.
 #
 # When a publisher re-registers under a new UUID (e.g. after a HA reinstall or
@@ -245,16 +251,24 @@ def expand_assets(df: pd.DataFrame) -> pd.DataFrame:
         soc_pct, setpoint_kw, available_up_kw, available_down_kw,
         shadow_power_balance_price, connection_state (nullable),
         power_flow_capability (nullable)
+
+    Placeholder assets (capacity_kwh <= PLACEHOLDER_CAPACITY_KWH, #15) are
+    dropped so they do not inflate EV counts, kWh totals or duty cycles.
     """
     if df.empty or "assets" not in df.columns:
         return pd.DataFrame()
 
     rows = []
+    placeholders = 0
     for _, rec in df.iterrows():
         assets = rec.get("assets", [])
         if not isinstance(assets, list):
             continue
         for asset in assets:
+            capacity = asset.get("capacity_kwh", 0.0)
+            if isinstance(capacity, (int, float)) and capacity <= PLACEHOLDER_CAPACITY_KWH + 1e-9:
+                placeholders += 1
+                continue
             rows.append({
                 "interval_start_utc": rec["interval_start_utc"],
                 "household_id": rec["household_id"],
@@ -272,6 +286,13 @@ def expand_assets(df: pd.DataFrame) -> pd.DataFrame:
                 "connection_state": asset.get("connection_state"),
                 "power_flow_capability": asset.get("power_flow_capability"),
             })
+
+    if placeholders:
+        _LOG.info(
+            "Ignored %d placeholder asset record(s) with capacity_kwh <= %.1f.",
+            placeholders,
+            PLACEHOLDER_CAPACITY_KWH,
+        )
 
     if not rows:
         return pd.DataFrame()
