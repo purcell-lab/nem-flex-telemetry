@@ -86,11 +86,45 @@
       },
       "assets": {
         "title": "Batteries and EVs",
-        "description": "Detected assets:\n{asset_summary}\n\nUnmapped HAEO entities: {unmapped_entities}",
+        "description": "How many home batteries and EVs does this household have? Each one gets its own step next, where you map its entities. Any of these may be 0.\n\nUnmapped HAEO entities: {unmapped_entities}",
         "data": {
-          "home_battery_capacity_kwh": "Home battery capacity (kWh)",
-          "ev1_capacity_kwh": "EV 1 battery capacity (kWh)",
-          "ev2_capacity_kwh": "EV 2 battery capacity (kWh)"
+          "home_battery_count": "Number of home batteries",
+          "ev_count": "Number of EVs",
+          "bidirectional_chargers": "Number of bidirectional (V2G) EV chargers"
+        },
+        "data_description": {
+          "home_battery_count": "Enter 0 if this household has no home battery.",
+          "ev_count": "Enter 0 if this household has no EV.",
+          "bidirectional_chargers": "Chargers that can also discharge an EV (V2G), shared by the EVs you allow on them. Enter 0 if every EV has a charge-only charger."
+        }
+      },
+      "asset_battery": {
+        "title": "Home battery: {asset_id}",
+        "description": "Pick the Home Assistant entities for this battery. Entities found on this instance are pre-filled.",
+        "data": {
+          "capacity_kwh": "Usable capacity (kWh)",
+          "soc_entity": "State of charge (%)",
+          "setpoint_entity": "Power setpoint (kW, positive = charging, optional)",
+          "shadow_entity": "HAEO power balance shadow price (optional)"
+        },
+        "data_description": {
+          "capacity_kwh": "Set to 0 or leave blank if this asset does not exist; it is then left out.",
+          "soc_entity": "Required when a capacity is set."
+        }
+      },
+      "asset_ev": {
+        "title": "EV: {asset_id}",
+        "description": "Pick the Home Assistant entities for this EV. Entities found on this instance are pre-filled. The plug state is inferred from the shadow price and setpoint. This household has {chargers} bidirectional charger(s).",
+        "data": {
+          "capacity_kwh": "Usable capacity (kWh)",
+          "soc_entity": "State of charge (%)",
+          "setpoint_entity": "Power setpoint (kW, positive = charging, optional)",
+          "shadow_entity": "HAEO power balance shadow price (optional)",
+          "bidirectional_capable": "This EV can use the bidirectional charger(s)"
+        },
+        "data_description": {
+          "capacity_kwh": "Set to 0 or leave blank if this asset does not exist; it is then left out.",
+          "soc_entity": "Required when a capacity is set."
         }
       },
       "no_push_access": {
@@ -121,8 +155,8 @@
   "options": {
     "step": {
       "init": {
-        "title": "Update entity mappings and capacities",
-        "description": "Pick the Home Assistant entity for each field. Fields marked optional can be left blank. Changes apply as soon as you submit.",
+        "title": "Update entity mappings and assets",
+        "description": "Pick the Home Assistant entity for each field. Fields marked optional can be left blank. Tick 'Edit batteries and EVs' to change the asset list in the next steps. Changes apply as soon as you submit.",
         "data": {
           "entity_net_import_kw": "Net grid import power (kW, positive = importing)",
           "entity_solar_kw": "Solar generation power (kW)",
@@ -138,13 +172,54 @@
           "entity_shadow_solar_forecast_price": "HAEO solar forecast shadow price (optional)",
           "entity_shadow_envelope_import_price": "HAEO import envelope shadow price (optional)",
           "entity_shadow_envelope_export_price": "HAEO export envelope shadow price (optional)",
-          "home_battery_capacity_kwh": "Home battery capacity (kWh)",
-          "ev1_capacity_kwh": "EV 1 battery capacity (kWh)",
-          "ev2_capacity_kwh": "EV 2 battery capacity (kWh)",
-          "source": "Record source"
+          "source": "Record source",
+          "edit_assets": "Edit batteries and EVs"
         },
         "data_description": {
           "source": "HAEO builds each record from the entities mapped below. Nimbus relays the complete record that Nimbus publishes on sensor.nimbus_flex_telemetry, so the mappings below are not used."
+        }
+      },
+      "assets": {
+        "title": "Batteries and EVs",
+        "description": "How many home batteries and EVs does this household have? Each one gets its own step next. Any of these may be 0.",
+        "data": {
+          "home_battery_count": "Number of home batteries",
+          "ev_count": "Number of EVs",
+          "bidirectional_chargers": "Number of bidirectional (V2G) EV chargers"
+        },
+        "data_description": {
+          "home_battery_count": "Enter 0 if this household has no home battery.",
+          "ev_count": "Enter 0 if this household has no EV.",
+          "bidirectional_chargers": "Chargers that can also discharge an EV (V2G), shared by the EVs you allow on them. Enter 0 if every EV has a charge-only charger."
+        }
+      },
+      "asset_battery": {
+        "title": "Home battery: {asset_id}",
+        "description": "Pick the Home Assistant entities for this battery. Entities found on this instance are pre-filled.",
+        "data": {
+          "capacity_kwh": "Usable capacity (kWh)",
+          "soc_entity": "State of charge (%)",
+          "setpoint_entity": "Power setpoint (kW, positive = charging, optional)",
+          "shadow_entity": "HAEO power balance shadow price (optional)"
+        },
+        "data_description": {
+          "capacity_kwh": "Set to 0 or leave blank if this asset does not exist; it is then left out.",
+          "soc_entity": "Required when a capacity is set."
+        }
+      },
+      "asset_ev": {
+        "title": "EV: {asset_id}",
+        "description": "Pick the Home Assistant entities for this EV. Entities found on this instance are pre-filled. The plug state is inferred from the shadow price and setpoint. This household has {chargers} bidirectional charger(s).",
+        "data": {
+          "capacity_kwh": "Usable capacity (kWh)",
+          "soc_entity": "State of charge (%)",
+          "setpoint_entity": "Power setpoint (kW, positive = charging, optional)",
+          "shadow_entity": "HAEO power balance shadow price (optional)",
+          "bidirectional_capable": "This EV can use the bidirectional charger(s)"
+        },
+        "data_description": {
+          "capacity_kwh": "Set to 0 or leave blank if this asset does not exist; it is then left out.",
+          "soc_entity": "Required when a capacity is set."
         }
       }
     },

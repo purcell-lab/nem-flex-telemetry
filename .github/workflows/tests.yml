@@ -51,4 +51,4 @@ jobs:
         run: |
           python -m venv /tmp/agg
           /tmp/agg/bin/pip install -q pytest pandas pyarrow jsonschema
-          /tmp/agg/bin/python -m pytest tests/test_aggregate_shadow.py -q -p no:cacheprovider
+          /tmp/agg/bin/python -m pytest tests/test_aggregate_shadow.py tests/test_aggregate_assets.py -q -p no:cacheprovider
