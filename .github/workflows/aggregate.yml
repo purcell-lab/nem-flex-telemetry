@@ -1,9 +1,16 @@
 name: Aggregate telemetry
 
 on:
-  # Run every hour. Schedule is now the sole automatic trigger so we
-  # avoid the schedule vs. push race that was causing Pages deploys to
-  # collide and fail with "Deployment failed, try again later."
+  # Run on each telemetry push. GitHub delays or drops scheduled runs on
+  # busy runners (4 to 6 runs a day instead of 24, gaps of up to 7.5 h),
+  # so the hourly cron alone left the dashboard hours stale (#23).
+  # The bot's own commit touches only data/cohort/ and site/data/, so it
+  # does not match this filter (and GITHUB_TOKEN pushes trigger nothing).
+  push:
+    branches: [main]
+    paths:
+      - "data/raw/**"
+  # Hourly backstop in case a push event is missed.
   schedule:
     - cron: "5 * * * *"
   # Allow manual trigger for on-demand refreshes.
@@ -14,13 +21,16 @@ permissions:
   pages: write
   id-token: write
 
-# Allow only one concurrent Pages deployment. cancel-in-progress: true
-# means a newer run supersedes an in-flight one instead of queueing,
-# which eliminates the collision race between overlapping deploys.
-# Aggregation is idempotent so losing an in-flight run costs nothing.
+# Allow only one aggregate + Pages deployment at a time. Runs are
+# serialised rather than cancelled: GitHub keeps at most one pending run
+# per group (a newer one replaces it), so a burst of telemetry pushes
+# collapses into one follow-up run, and an in-flight deploy is never
+# killed halfway. This is what prevented the earlier push vs. schedule
+# collisions ("Deployment failed, try again later"). Aggregation reads
+# all of data/raw/, so the pending run picks up every queued push.
 concurrency:
   group: "pages"
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   aggregate:

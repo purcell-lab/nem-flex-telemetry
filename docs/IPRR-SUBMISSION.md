@@ -20,7 +20,7 @@ OpenElectricity (openelectricity.org.au) solved this problem for generation in 2
 
 NEM Flex Telemetry (github.com/purcell-lab/nem-flex-telemetry) is an open-source Home Assistant integration that reads state from HAEO (github.com/hass-energy/haeo), an open LP-based energy optimiser, and pushes 5-minute interval telemetry to a public GitHub repository. The data is published under CC-BY-4.0.
 
-The schema is now at v2.0 (integration v0.3.0), with 18 flat top-level fields, an asset array for batteries and EVs, and shadow prices as first-class fields. The schema maps to all four categories of data the Reporting Guidelines require from aggregators:
+The schema is now at v2.0 (integration v0.7.1), with 18 flat top-level fields, an asset array for batteries and EVs, and shadow prices as first-class fields. The schema maps to all four categories of data the Reporting Guidelines require from aggregators:
 
 1. **Available flexible capacity:** `flex_available_up_kw` and `flex_available_down_kw` at cohort level. Per-asset: `available_up_kw` and `available_down_kw` for each battery and EV. This is real-time capacity, not a modelled estimate.
 
@@ -75,7 +75,7 @@ This project does not seek to replace the Reporting Track. It is a complement:
 
 **Technical readiness**
 
-The integration is at v0.3.0. Schema v2.0 is stable. The GitHub Actions aggregation pipeline produces seven dashboard views including the new asset and shadow price tabs. The installation path is via HACS, which is the standard mechanism for community Home Assistant integrations.
+The integration is at v0.7.1. Schema v2.0 is stable. The GitHub Actions aggregation pipeline produces seven dashboard views including the new asset and shadow price tabs. The installation path is via HACS, which is the standard mechanism for community Home Assistant integrations.
 
 The roadmap to 1000 households (v1.0) is realistic given the existing HAEO user base and the low friction of the HACS installation path. A cohort of that size, across multiple NEM regions, would provide statistically significant price-response curves, the first open envelope constraint dataset in the NEM, and the first open dataset of real constraint-binding shadow prices from distributed energy optimisers.
 
