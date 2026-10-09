@@ -181,6 +181,8 @@ The aggregation action produces:
 - `data/cohort/5min/YYYY/MM/DD.parquet`: all households, 5-minute resolution
 - `data/cohort/hourly/YYYY/MM/DD.parquet`: resampled to 1-hour intervals
 - `data/cohort/daily/YYYY/MM/DD.parquet`: daily summaries
+
+Cohort parquet rows carry no `household_id`. `postcode_prefix` is blank for prefixes shared by fewer than `K_MIN_PREFIX` households, and regions below `K_MIN_REGION` households are pooled into `NEM` or dropped. See [docs/PRIVACY.md](docs/PRIVACY.md#k-anonymity-guardrails).
 - `site/data/assets_summary.json`: asset mix, V2G duty cycle, dispatch share (dashboard tab 6)
 - `site/data/shadow_prices.json`: shadow price distributions and envelope heatmap (dashboard tab 7)
 
