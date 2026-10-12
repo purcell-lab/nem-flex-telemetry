@@ -34,7 +34,7 @@ No migration from v1.1 exists. No v1.1 records were published to production, so 
 | `deferrable_load_kw` | float | kW | yes | Sum of deferrable load current\_kw (>= 0). Zero for v0.3. |
 | `naive_baseline_kw` | float | kW | yes | Estimated consumption without optimisation. |
 | `naive_baseline_method` | string | enum | yes | `'subtraction'` or `'haeo_counterfactual'`. |
-| `price_signal_seen` | float | $/kWh | yes | Buy price seen by the optimiser. Range: -2.0 to 20.0. |
+| `price_signal_seen` | float | $/kWh | yes | Buy price seen by the optimiser. Range: -2.0 to 30.0. |
 | `price_export_seen` | float | $/kWh | yes | Sell price seen by the optimiser. Positive = FiT earned; negative = negative-FiT event. |
 | `envelope_import_limit_kw` | float | kW | yes | Maximum import allowed (>= 0). From `number.grid_import_limit`. |
 | `envelope_export_limit_kw` | float | kW | yes | Maximum export allowed (>= 0). Positive magnitude. |
@@ -46,7 +46,7 @@ No migration from v1.1 exists. No v1.1 records were published to production, so 
 | `shadow_envelope_import_price` | float or null | $/kWh | yes | LP dual for grid import envelope. From `sensor.grid_max_import_power_shadow_price`. Non-zero when envelope is binding. |
 | `shadow_envelope_export_price` | float or null | $/kWh | yes | LP dual for grid export envelope. From `sensor.grid_max_export_power_shadow_price`. Non-zero when envelope is binding. |
 
-**Price range:** All price fields use $/kWh. The market prices (`price_signal_seen`, `price_export_seen`) use a minimum of -2.0 and a maximum of 20.0. This range covers extreme negative-FiT events at the low end and capacity-price spikes at the high end.
+**Price range:** All price fields use $/kWh. The market prices (`price_signal_seen`, `price_export_seen`) use a minimum of -2.0 and a maximum of 30.0. This range covers extreme negative-FiT events at the low end. At the high end it covers retail prices at the NEM market price cap ($20.70/kWh in 2026-27, plus GST and network charges), with headroom for annual CPI indexation.
 
 **Shadow price range:** The `shadow_*` fields and the per-asset `shadow_power_balance_price` are LP duals, not market prices. A dual is the marginal value of relaxing a constraint, so it grows large when a hard constraint binds. For example, with a full battery and the export envelope binding, HAEO has reported a power-balance dual of -9.77 $/kWh. These fields use a sanity guard of -1000 to 1000, which still catches $/MWh unit errors. The dashboard uses medians for these fields, so one constraint-bound episode does not distort the hourly view (#30).
 
@@ -209,7 +209,7 @@ The aggregation action produces:
 ## Validators
 
 - JSON Schema: [schema/telemetry.schema.json](schema/telemetry.schema.json)
-- CI validation: [.github/workflows/validate.yml](.github/workflows/validate.yml). Checks schema\_version == '2.0', JSON Schema compliance, $/kWh range (-2.0 to 20.0) on market price fields, and the -1000 to 1000 guard on shadow prices.
+- CI validation: [.github/workflows/validate.yml](.github/workflows/validate.yml). Checks schema\_version == '2.0', JSON Schema compliance, $/kWh range (-2.0 to 30.0) on market price fields, and the -1000 to 1000 guard on shadow prices.
 - Integration-side validation: `coordinator.py` runs voluptuous validation before every push.
 
 ---

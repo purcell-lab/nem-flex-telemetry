@@ -36,6 +36,8 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     ASSET_DEFAULTS,
+    MARKET_PRICE_MAX,
+    MARKET_PRICE_MIN,
     SHADOW_PRICE_MAX,
     SHADOW_PRICE_MIN,
     CONF_EV1_CAPACITY_KWH,
@@ -1149,12 +1151,14 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         CI workflow via jsonschema. Here we just confirm critical fields are
         present and prices are in plausible $/kWh range.
 
-        Market prices use the -2.0 to 20.0 $/kWh window. LP duals (shadow_*)
+        Market prices use the MARKET_PRICE_MIN to MARKET_PRICE_MAX $/kWh window. LP duals (shadow_*)
         are not market prices: they grow without a price-cap bound when a hard
         constraint binds, so they only get a wide sanity guard (#30).
         """
         _NEM_REGIONS = vol.In(["NSW1", "QLD1", "VIC1", "SA1", "TAS1"])
-        _PRICE_RANGE = vol.All(vol.Coerce(float), vol.Range(min=-2.0, max=20.0))
+        _PRICE_RANGE = vol.All(
+            vol.Coerce(float), vol.Range(min=MARKET_PRICE_MIN, max=MARKET_PRICE_MAX)
+        )
         _SHADOW_RANGE = vol.All(
             vol.Coerce(float), vol.Range(min=SHADOW_PRICE_MIN, max=SHADOW_PRICE_MAX)
         )

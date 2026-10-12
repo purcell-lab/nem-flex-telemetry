@@ -183,7 +183,7 @@ jobs:
       # Checks:
       #   - schema_version field == '2.0' (v1.x records are rejected)
       #   - JSON Schema validates (additionalProperties: false at top level)
-      #   - Market price fields are in $/kWh range (-2.0 to 20.0); shadow_* duals within -1000 to 1000
+      #   - Market price fields are in $/kWh range (-2.0 to 30.0); shadow_* duals within -1000 to 1000
       # ------------------------------------------------------------------
       - name: Validate changed JSONL files against schema v2.0
         id: validate
@@ -208,7 +208,7 @@ jobs:
 
           validator = jsonschema.Draft202012Validator(schema)
 
-          # Market price fields that must be in $/kWh range (-2.0 to 20.0).
+          # Market price fields that must be in $/kWh range (-2.0 to 30.0).
           # shadow_* LP duals are not market prices; the JSON Schema gives
           # them a -1000 to 1000 sanity guard instead (#30).
           PRICE_FIELDS = [
@@ -216,7 +216,7 @@ jobs:
               "price_export_seen",
           ]
           PRICE_MIN = -2.0
-          PRICE_MAX = 20.0
+          PRICE_MAX = 30.0
 
           changed_raw = os.environ.get("CHANGED_FILES", "")
           changed_files = [p.strip() for p in changed_raw.splitlines() if p.strip()]
