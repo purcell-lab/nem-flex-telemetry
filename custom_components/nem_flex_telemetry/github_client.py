@@ -255,6 +255,62 @@ class NemFlexGitHubClient:
                 )
                 await self._push_with_retry(session, file_path, new_content, msg)
 
+    @staticmethod
+    def _decode_contents(get_data: dict[str, Any]) -> str | None:
+        """Return a file's text from a Contents API JSON response, or None.
+
+        For files of 1 MB to 100 MB GitHub returns the sha with an empty
+        ``content`` and ``encoding: "none"``. None means "content not
+        included" (fetch it raw), as opposed to "" for a genuinely empty file.
+        """
+        size = get_data.get("size")
+        if size == 0:
+            return ""
+        content = get_data.get("content")
+        if get_data.get("encoding") != "base64" or not content:
+            return None
+        # Strip line breaks that GitHub adds to base64
+        text = base64.b64decode(content.replace("\n", "")).decode("utf-8")
+        if isinstance(size, int) and len(text.encode("utf-8")) != size:
+            return None
+        return text
+
+    async def _get_raw_text(
+        self,
+        session: aiohttp.ClientSession,
+        contents_url: str,
+        file_path: str,
+        get_data: dict[str, Any],
+    ) -> str:
+        """Fetch a file's full text through the raw media type (up to 100 MB).
+
+        Raises rather than returning partial text, so the caller never commits
+        an append built on a truncated copy.
+
+        Raises:
+            TokenInvalidError: On HTTP 401.
+            GitHubPushError: If the file cannot be read in full.
+        """
+        headers = {"Accept": "application/vnd.github.raw+json"}
+        async with session.get(contents_url, headers=headers) as raw_resp:
+            if raw_resp.status == 401:
+                raise TokenInvalidError(
+                    "GitHub rejected the stored token (HTTP 401). Re-authentication required."
+                )
+            if raw_resp.status != 200:
+                raise GitHubPushError(
+                    f"GitHub raw GET {file_path} returned HTTP {raw_resp.status}; "
+                    "not appending without the existing content"
+                )
+            body = await raw_resp.read()
+        size = get_data.get("size")
+        if isinstance(size, int) and len(body) != size:
+            raise GitHubPushError(
+                f"GitHub raw GET {file_path} returned {len(body)} bytes, "
+                f"expected {size}; not appending without the full existing content"
+            )
+        return body.decode("utf-8")
+
     async def _push_with_retry(
         self,
         session: aiohttp.ClientSession,
@@ -277,13 +333,13 @@ class NemFlexGitHubClient:
             try:
                 # Try to fetch the existing file to get its SHA and current content
                 sha: str | None = None
-                existing_content_b64: str | None = None
+                existing_text: str | None = None
 
                 async with session.get(contents_url) as get_resp:
                     if get_resp.status == 200:
                         get_data: dict[str, Any] = await get_resp.json()
                         sha = get_data.get("sha")
-                        existing_content_b64 = get_data.get("content", "")
+                        existing_text = self._decode_contents(get_data)
                     elif get_resp.status == 404:
                         # File does not exist yet; will be created
                         sha = None
@@ -297,11 +353,16 @@ class NemFlexGitHubClient:
                             f"GitHub GET {file_path} returned HTTP {get_resp.status}: {text}"
                         )
 
+                # Files of 1 MB or more come back from the JSON endpoint without
+                # their content. Fetch them raw: committing new_content alone
+                # with this sha would replace the whole day file.
+                if sha and existing_text is None:
+                    existing_text = await self._get_raw_text(
+                        session, contents_url, file_path, get_data
+                    )
+
                 # Build the content to commit
-                if existing_content_b64:
-                    # Strip line breaks that GitHub adds to base64
-                    cleaned = existing_content_b64.replace("\n", "")
-                    existing_text = base64.b64decode(cleaned).decode("utf-8")
+                if existing_text:
                     to_add = dedupe_new_lines(existing_text, new_content)
                     if not to_add:
                         _LOGGER.debug("All records already present in %s", file_path)
