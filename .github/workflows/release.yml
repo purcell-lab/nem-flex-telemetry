@@ -1,0 +1,116 @@
+name: "Release"
+
+# Tags a release commit and publishes the GitHub release that HACS installs
+# from. Same house style as purcell-lab/nem_pd7day:
+#   tag      vX.Y.Z (annotated), message "vX.Y.Z: <summary>"
+#   release  title "vX.Y.Z: <summary>", notes from docs/releases/vX.Y.Z.md,
+#            or the input, or the tagged commit's body
+#
+# Manual only. Bump manifest.json, VERSION in const.py and the README status
+# line in the release commit first; the workflow refuses to tag a commit where
+# they do not all carry the version, because HACS installs what the manifest
+# says, not what the tag says. It never moves an existing tag.
+#
+# hacs.json has zip_release: false, so HACS installs from the tagged tree and
+# no asset is attached.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without the leading v, e.g. 0.7.2. Must match manifest.json at the target."
+        required: true
+        type: string
+      summary:
+        description: "Lower-case summary phrase used in the tag message and the release title."
+        required: true
+        type: string
+      target:
+        description: "Commit sha or branch to tag. Defaults to the head of main."
+        required: false
+        default: main
+        type: string
+      notes:
+        description: "Release notes. Leave empty to use docs/releases/vX.Y.Z.md, or the tagged commit's message body when that file is absent."
+        required: false
+        type: string
+      prerelease:
+        description: "Mark the release as a pre-release."
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  release:
+    name: "Tag and release v${{ inputs.version }}"
+    runs-on: "ubuntu-latest"
+    permissions:
+      contents: write
+    steps:
+      - name: "Checkout the target"
+        uses: "actions/checkout@v5"
+        with:
+          ref: ${{ inputs.target }}
+          fetch-depth: 0
+
+      # A release cut from a manifest that still says the previous version
+      # installs as that previous version. Refuse unless the tag, manifest.json,
+      # const.py and the README agree, and never move an existing tag.
+      - name: "Check the version is carried everywhere and the tag is new"
+        shell: "bash"
+        run: |
+          python3 scripts/version_lockstep.py --tag "v${{ inputs.version }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/v${{ inputs.version }}" >/dev/null; then
+            echo "::error::tag v${{ inputs.version }} already exists. Delete it explicitly if it is wrong; this workflow never moves a tag."
+            exit 1
+          fi
+
+      - name: "Write the release notes"
+        shell: "bash"
+        env:
+          NOTES: ${{ inputs.notes }}
+        run: |
+          if [ -n "$NOTES" ]; then
+            printf '%s\n' "$NOTES" > /tmp/notes.md
+          elif [ -f "docs/releases/v${{ inputs.version }}.md" ]; then
+            cp "docs/releases/v${{ inputs.version }}.md" /tmp/notes.md
+          else
+            # The tagged commit's body, minus trailer lines such as Co-Authored-By.
+            git log -1 --format=%b HEAD | python3 -c '
+          import re, sys
+          lines = sys.stdin.read().rstrip().splitlines()
+          while lines and re.match(r"^[A-Za-z-]+: \S", lines[-1]):
+              lines.pop()
+          print("\n".join(lines).strip())
+          ' > /tmp/notes.md
+          fi
+          echo "--- notes ---"; cat /tmp/notes.md
+
+      - name: "Create the annotated tag"
+        shell: "bash"
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ inputs.version }}" -m "v${{ inputs.version }}: ${{ inputs.summary }}" HEAD
+          git push origin "refs/tags/v${{ inputs.version }}"
+
+      - name: "Publish the release"
+        shell: "bash"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ inputs.version }}" \
+            --title "v${{ inputs.version }}: ${{ inputs.summary }}" \
+            --notes-file /tmp/notes.md \
+            --verify-tag \
+            ${{ inputs.prerelease && '--prerelease' || '' }}
+
+      - name: "Verify"
+        shell: "bash"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/git/refs/tags/v${{ inputs.version }}" --jq '"tag object type: \(.object.type)"'
+          gh api "repos/${{ github.repository }}/releases/tags/v${{ inputs.version }}" --jq '"\(.tag_name) draft=\(.draft) prerelease=\(.prerelease) \(.name)"'
