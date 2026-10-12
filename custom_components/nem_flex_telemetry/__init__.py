@@ -20,9 +20,14 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant, ServiceCall
 
+from .assets import legacy_assets
 from .const import (
+    CONF_ASSETS,
+    CONF_BIDIRECTIONAL_CHARGERS,
     CONF_ENTITY_SHADOW_ENERGY,
+    DEFAULT_BIDIRECTIONAL_CHARGERS,
     DEFAULT_HAEO_ENTITIES,
+    LEGACY_CAPACITY_KEYS,
     DOMAIN,
     PLATFORMS,
     SERVICE_MANUAL_PUSH,
@@ -48,6 +53,14 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         The old install pre-dates this field so existing entries have no
         value for it; this migration backfills it without forcing the user
         to delete and re-add the integration.
+
+    v3 -> v4 (#15):
+        Replace the fixed home_battery / ev1 / ev2 capacity keys with an
+        explicit asset list (``CONF_ASSETS``) using the same entities and
+        capacities, and one shared bidirectional charger, so the reference
+        install publishes exactly as before. Capacities may have been edited
+        in the options flow, so options are read too. An asset entered with
+        the 0.1 kWh placeholder is dropped.
     """
     _LOGGER.info(
         "Migrating NEM Flex Telemetry config entry %s from v%s",
@@ -69,6 +82,27 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     entry.entry_id,
                 )
         hass.config_entries.async_update_entry(entry, data=new_data, version=3)
+
+    if entry.version < 4:
+        assets = legacy_assets({**entry.data, **entry.options})
+        new_data = {
+            k: v for k, v in entry.data.items() if k not in LEGACY_CAPACITY_KEYS.values()
+        }
+        new_data[CONF_ASSETS] = assets
+        new_data.setdefault(CONF_BIDIRECTIONAL_CHARGERS, DEFAULT_BIDIRECTIONAL_CHARGERS)
+        new_options = {
+            k: v
+            for k, v in entry.options.items()
+            if k not in LEGACY_CAPACITY_KEYS.values()
+        }
+        hass.config_entries.async_update_entry(
+            entry, data=new_data, options=new_options, version=4
+        )
+        _LOGGER.info(
+            "v3->v4: entry %s assets = %s",
+            entry.entry_id,
+            ", ".join(a["asset_id"] for a in assets) or "none",
+        )
 
     _LOGGER.info(
         "NEM Flex Telemetry config entry %s migrated to v%s",

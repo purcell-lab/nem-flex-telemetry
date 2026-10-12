@@ -8,8 +8,11 @@ Flow steps (initial setup):
   5. async_step_entities_confirm  -- all HAEO entities auto-detected (confirm or customise)
      async_step_entities_partial  -- some entities missing (pre-filled + missing fields)
      async_step_entities_manual   -- no HAEO detected (full manual form)
-  6. async_step_assets            -- discovered assets summary, EV/battery capacity config,
-                                     unmapped entity report
+  6. async_step_assets            -- how many home batteries, EVs and bidirectional
+                                     chargers; unmapped entity report
+     async_step_asset_battery     -- one step per battery: capacity + entity mapping
+     async_step_asset_ev          -- one step per EV: capacity + entity mapping +
+                                     bidirectional charger access
   7. async_step_consent           -- CC-BY-4.0 licence + cohort participation
   8. async_step_auth_error        -- Device Flow failure with retry/abort options
 
@@ -34,8 +37,17 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import selector
 
 from .const import (
-    ASSET_DEFAULTS,
+    ASSET_KIND_BATTERY,
+    ASSET_KIND_EV,
+    CONF_ASSET_BIDIRECTIONAL,
+    CONF_ASSET_CAPACITY_KWH,
+    CONF_ASSET_SETPOINT_ENTITY,
+    CONF_ASSET_SHADOW_ENTITY,
+    CONF_ASSET_SOC_ENTITY,
+    CONF_ASSETS,
+    CONF_BIDIRECTIONAL_CHARGERS,
     CONF_CONSENT_TIMESTAMP,
+    CONF_EDIT_ASSETS,
     CONF_ENTITY_ENVELOPE_EXPORT,
     CONF_ENTITY_ENVELOPE_IMPORT,
     CONF_ENTITY_FLEX_DOWN,
@@ -50,10 +62,9 @@ from .const import (
     CONF_ENTITY_SHADOW_SOLAR_FORECAST,
     CONF_ENTITY_SOLAR,
     CONF_ENTITY_TOTAL_LOAD,
-    CONF_EV1_CAPACITY_KWH,
-    CONF_EV2_CAPACITY_KWH,
+    CONF_EV_COUNT,
     CONF_GITHUB_LOGIN,
-    CONF_HOME_BATTERY_CAPACITY_KWH,
+    CONF_HOME_BATTERY_COUNT,
     CONF_HOUSEHOLD_ID,
     CONF_LICENCE_AGREED,
     CONF_OPT_IN_COHORT,
@@ -61,9 +72,12 @@ from .const import (
     CONF_REGION,
     CONF_TOKEN,
     CONF_SOURCE,
+    DEFAULT_BIDIRECTIONAL_CHARGERS,
     DEFAULT_ENTITY_MAPPINGS,
     DOMAIN,
     GITHUB_REPO,
+    MAX_ASSETS_PER_KIND,
+    MAX_BIDIRECTIONAL_CHARGERS,
     NIMBUS_TELEMETRY_ENTITY,
     SOURCE_HAEO,
     SOURCE_NIMBUS,
@@ -82,9 +96,12 @@ from .device_flow import (
     fetch_authenticated_user,
 )
 from .github_client import NemFlexGitHubClient
+from .assets import asset_id_for, configured_assets, normalise_asset
 from .discovery import (
     build_entity_map,
     classify_discovery_result,
+    discover_asset_counts,
+    discover_asset_entities,
     discover_haeo_entities,
     run_global_sweep,
 )
@@ -165,7 +182,154 @@ def _entity_schema(fields: list[str], defaults: dict[str, str]) -> vol.Schema:
     )
 
 
-class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+def _plan_asset_ids(
+    kind: str, count: int, previous: list[dict[str, Any]]
+) -> list[str]:
+    """Pick asset_ids for ``count`` assets of one kind.
+
+    Existing assets of that kind keep their ids (and so their mappings) in
+    order; new ones take the next free ``asset_id_for`` slot.
+    """
+    ids = [a["asset_id"] for a in previous if a.get("kind") == kind][:count]
+    index = 1
+    while len(ids) < count:
+        candidate = asset_id_for(kind, index)
+        if candidate not in ids:
+            ids.append(candidate)
+        index += 1
+    return ids
+
+
+def _asset_counts_schema(batteries: int, evs: int, chargers: int) -> vol.Schema:
+    """Form asking how many batteries, EVs and bidirectional chargers (#15)."""
+    count = vol.All(vol.Coerce(int), vol.Range(min=0, max=MAX_ASSETS_PER_KIND))
+    return vol.Schema(
+        {
+            vol.Required(CONF_HOME_BATTERY_COUNT, default=batteries): count,
+            vol.Required(CONF_EV_COUNT, default=evs): count,
+            vol.Required(CONF_BIDIRECTIONAL_CHARGERS, default=chargers): vol.All(
+                vol.Coerce(int), vol.Range(min=0, max=MAX_BIDIRECTIONAL_CHARGERS)
+            ),
+        }
+    )
+
+
+class _AssetStepsMixin:
+    """Per-asset mapping steps shared by the config and options flows (#15).
+
+    ``_async_start_asset_steps`` queues one step per asset; each step asks for
+    the capacity and the SOC / setpoint / shadow entities. A capacity of 0 (or
+    blank) means the asset does not exist and it is left out. When the queue
+    is empty ``_async_assets_done`` receives the asset list.
+    """
+
+    _asset_queue: list[tuple[str, str]]
+    _assets_out: list[dict[str, Any]]
+    _assets_prev: dict[str, dict[str, Any]]
+    _chargers: int
+
+    async def _async_assets_done(
+        self, assets: list[dict[str, Any]], chargers: int
+    ) -> FlowResult:
+        raise NotImplementedError
+
+    async def _async_start_asset_steps(
+        self, user_input: dict[str, Any], previous: list[dict[str, Any]]
+    ) -> FlowResult:
+        """Queue the asset steps for the counts the user chose."""
+        self._chargers = int(user_input[CONF_BIDIRECTIONAL_CHARGERS])
+        self._assets_prev = {a["asset_id"]: a for a in previous}
+        self._assets_out = []
+        self._asset_queue = [
+            (asset_id, kind)
+            for kind, key in (
+                (ASSET_KIND_BATTERY, CONF_HOME_BATTERY_COUNT),
+                (ASSET_KIND_EV, CONF_EV_COUNT),
+            )
+            for asset_id in _plan_asset_ids(kind, int(user_input[key]), previous)
+        ]
+        return await self._async_next_asset_step()
+
+    async def _async_next_asset_step(self) -> FlowResult:
+        if not self._asset_queue:
+            return await self._async_assets_done(self._assets_out, self._chargers)
+        if self._asset_queue[0][1] == ASSET_KIND_EV:
+            return await self.async_step_asset_ev()
+        return await self.async_step_asset_battery()
+
+    async def async_step_asset_battery(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Capacity and entity mapping for one home battery."""
+        return await self._async_asset_step("asset_battery", user_input)
+
+    async def async_step_asset_ev(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Capacity, entity mapping and charger access for one EV."""
+        return await self._async_asset_step("asset_ev", user_input)
+
+    async def _async_asset_step(
+        self, step_id: str, user_input: dict[str, Any] | None
+    ) -> FlowResult:
+        asset_id, kind = self._asset_queue[0]
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            capacity = float(user_input.get(CONF_ASSET_CAPACITY_KWH) or 0.0)
+            if capacity > 0 and not user_input.get(CONF_ASSET_SOC_ENTITY):
+                errors[CONF_ASSET_SOC_ENTITY] = "entity_required"
+            else:
+                if capacity > 0:
+                    if not self._chargers:
+                        user_input[CONF_ASSET_BIDIRECTIONAL] = False
+                    self._assets_out.append(
+                        normalise_asset(asset_id, kind, capacity, user_input)
+                    )
+                self._asset_queue.pop(0)
+                return await self._async_next_asset_step()
+
+        # Pre-fill from the previous mapping (options flow) or from the
+        # discovery hints that exist on this instance.
+        current = self._assets_prev.get(asset_id) or discover_asset_entities(
+            self.hass, asset_id
+        )
+        current = {**current, **(user_input or {})}
+
+        def _suggested(key: str) -> dict[str, Any] | None:
+            value = current.get(key)
+            return {"suggested_value": value} if value else None
+
+        schema: dict[Any, Any] = {
+            vol.Optional(
+                CONF_ASSET_CAPACITY_KWH,
+                description=_suggested(CONF_ASSET_CAPACITY_KWH),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=500.0)),
+        }
+        for key in (CONF_ASSET_SOC_ENTITY, CONF_ASSET_SETPOINT_ENTITY, CONF_ASSET_SHADOW_ENTITY):
+            schema[vol.Optional(key, description=_suggested(key))] = _ENTITY_SELECTOR
+        if kind == ASSET_KIND_EV and self._chargers:
+            schema[
+                vol.Required(
+                    CONF_ASSET_BIDIRECTIONAL,
+                    default=bool(current.get(CONF_ASSET_BIDIRECTIONAL, True)),
+                )
+            ] = bool
+
+        return self.async_show_form(
+            step_id=step_id,
+            data_schema=vol.Schema(schema),
+            errors=errors,
+            description_placeholders={
+                "asset_id": asset_id,
+                "chargers": str(self._chargers),
+            },
+        )
+
+
+class NemFlexTelemetryConfigFlow(
+    _AssetStepsMixin, config_entries.ConfigFlow, domain=DOMAIN
+):
     """Handle the NEM Flex Telemetry config flow.
 
     Guides the user through GitHub Device Flow authorisation, household
@@ -173,7 +337,8 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     asset configuration, and consent.
     """
 
-    VERSION = 3
+    # v4 (#15): variable asset list under CONF_ASSETS.
+    VERSION = 4
 
     def __init__(self) -> None:
         """Initialise the config flow."""
@@ -531,66 +696,37 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_assets(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Show discovered assets and ask for EV and battery capacity.
+        """Ask how many home batteries, EVs and bidirectional chargers (#15).
 
-        Displays a read-only summary of the assets in ASSET_DEFAULTS, shows
-        any unmapped entities from the global sweep, and collects capacity
-        values for home_battery, ev1, and ev2 (since HAEO may not expose them).
-
-        A 'Some of my assets are missing' path is not yet a separate step in
-        v0.3 but the unmapped_entities list is stored in the config data for
-        the coordinator to surface.
+        Any of the three may be 0. The counts are pre-filled from the assets
+        whose hinted entities exist on this instance; one asset step per
+        battery and EV follows. Any unmapped entities from the global sweep
+        are listed so the user can spot asset entities with unusual names.
         """
         if user_input is not None:
-            # Save capacity values and unmapped entity list
-            self._data[CONF_HOME_BATTERY_CAPACITY_KWH] = float(
-                user_input.get(CONF_HOME_BATTERY_CAPACITY_KWH, 13.5)
-            )
-            self._data[CONF_EV1_CAPACITY_KWH] = float(
-                user_input.get(CONF_EV1_CAPACITY_KWH, 75.0)
-            )
-            self._data[CONF_EV2_CAPACITY_KWH] = float(
-                user_input.get(CONF_EV2_CAPACITY_KWH, 60.0)
-            )
-            # Store unmapped entity list for coordinator to surface
-            self._data["unmapped_entities"] = self._unmapped_entities
-            return await self.async_step_consent()
+            return await self._async_start_asset_steps(user_input, previous=[])
 
-        # Build asset summary for description_placeholders
-        asset_lines = []
-        for asset_id, spec in ASSET_DEFAULTS.items():
-            asset_lines.append(
-                f"{asset_id} ({spec['kind']}): "
-                f"soc={spec.get('soc_entity', 'n/a')}, "
-                f"setpoint={spec.get('setpoint_entity', 'n/a')}"
-            )
-        asset_summary = "\n".join(asset_lines)
-
+        batteries, evs, chargers = discover_asset_counts(self.hass)
         unmapped_summary = (
             ", ".join(self._unmapped_entities) if self._unmapped_entities else "none"
         )
-
-        schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_HOME_BATTERY_CAPACITY_KWH, default=13.5
-                ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=500.0)),
-                vol.Required(
-                    CONF_EV1_CAPACITY_KWH, default=75.0
-                ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=500.0)),
-                vol.Required(
-                    CONF_EV2_CAPACITY_KWH, default=60.0
-                ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=500.0)),
-            }
-        )
         return self.async_show_form(
             step_id="assets",
-            data_schema=schema,
+            data_schema=_asset_counts_schema(batteries, evs, chargers),
             description_placeholders={
-                "asset_summary": asset_summary,
                 "unmapped_entities": unmapped_summary,
             },
         )
+
+    async def _async_assets_done(
+        self, assets: list[dict[str, Any]], chargers: int
+    ) -> FlowResult:
+        """Store the asset list and continue to consent."""
+        self._data[CONF_ASSETS] = assets
+        self._data[CONF_BIDIRECTIONAL_CHARGERS] = chargers
+        # Store unmapped entity list for coordinator to surface
+        self._data["unmapped_entities"] = self._unmapped_entities
+        return await self.async_step_consent()
 
     # -----------------------------------------------------------------------
     # Step 7: Consent (CC-BY-4.0 + cohort participation)
@@ -724,8 +860,8 @@ class NemFlexTelemetryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 # ---------------------------------------------------------------------------
 
 
-class NemFlexTelemetryOptionsFlow(config_entries.OptionsFlow):
-    """Options flow to update entity mappings and asset capacities.
+class NemFlexTelemetryOptionsFlow(_AssetStepsMixin, config_entries.OptionsFlow):
+    """Options flow to update entity mappings and the asset list.
 
     Values are written to ``entry.options``. The coordinator reads the merged
     view ``{**entry.data, **entry.options}`` (see ``entry_config``), and an
@@ -734,12 +870,17 @@ class NemFlexTelemetryOptionsFlow(config_entries.OptionsFlow):
     Every entity field is written explicitly. A cleared optional field is
     stored as ``None`` so it overrides the original value in ``entry.data``
     instead of silently falling back to it.
+
+    The asset list is carried over unchanged unless "Edit batteries and
+    EVs" is ticked, which leads through the same asset steps as setup (#15).
     """
+
+    _pending_options: dict[str, Any]
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Show and save entity mappings and asset capacities."""
+        """Show and save entity mappings; optionally go on to the assets."""
         errors: dict[str, str] = {}
         current = {**self.config_entry.data, **self.config_entry.options}
         entity_fields = list(DEFAULT_ENTITY_MAPPINGS.keys())
@@ -761,9 +902,16 @@ class NemFlexTelemetryOptionsFlow(config_entries.OptionsFlow):
                     for field in entity_fields
                 }
                 new_options[CONF_SOURCE] = source
-                for key in _CAPACITY_FIELDS:
-                    if key in user_input:
-                        new_options[key] = float(user_input[key])
+                # Options are replaced wholesale on save, so carry the asset
+                # list over explicitly.
+                saved = {**self.config_entry.data, **self.config_entry.options}
+                new_options[CONF_ASSETS] = configured_assets(saved)
+                new_options[CONF_BIDIRECTIONAL_CHARGERS] = int(
+                    saved.get(CONF_BIDIRECTIONAL_CHARGERS, DEFAULT_BIDIRECTIONAL_CHARGERS)
+                )
+                if user_input.get(CONF_EDIT_ASSETS):
+                    self._pending_options = new_options
+                    return await self.async_step_assets()
                 return self.async_create_entry(title="", data=new_options)
             # Re-show the form with what the user just entered.
             current = {**current, **user_input}
@@ -774,12 +922,35 @@ class NemFlexTelemetryOptionsFlow(config_entries.OptionsFlow):
             errors=errors,
         )
 
+    async def async_step_assets(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Ask how many batteries, EVs and bidirectional chargers (#15)."""
+        previous = self._pending_options[CONF_ASSETS]
+        if user_input is not None:
+            return await self._async_start_asset_steps(user_input, previous)
 
-_CAPACITY_FIELDS: dict[str, float] = {
-    CONF_HOME_BATTERY_CAPACITY_KWH: 13.5,
-    CONF_EV1_CAPACITY_KWH: 75.0,
-    CONF_EV2_CAPACITY_KWH: 60.0,
-}
+        return self.async_show_form(
+            step_id="assets",
+            data_schema=_asset_counts_schema(
+                sum(1 for a in previous if a.get("kind") == ASSET_KIND_BATTERY),
+                sum(1 for a in previous if a.get("kind") == ASSET_KIND_EV),
+                self._pending_options[CONF_BIDIRECTIONAL_CHARGERS],
+            ),
+        )
+
+    async def _async_assets_done(
+        self, assets: list[dict[str, Any]], chargers: int
+    ) -> FlowResult:
+        """Save the mappings from the first step with the new asset list."""
+        return self.async_create_entry(
+            title="",
+            data={
+                **self._pending_options,
+                CONF_ASSETS: assets,
+                CONF_BIDIRECTIONAL_CHARGERS: chargers,
+            },
+        )
 
 
 def _options_schema(entity_fields: list[str], current: dict[str, Any]) -> vol.Schema:
@@ -808,8 +979,5 @@ def _options_schema(entity_fields: list[str], current: dict[str, Any]) -> vol.Sc
         value = current.get(field)
         description = {"suggested_value": value} if value else None
         schema[marker(field, description=description)] = _ENTITY_SELECTOR
-    for key, fallback in _CAPACITY_FIELDS.items():
-        schema[vol.Required(key, default=float(current.get(key, fallback)))] = vol.All(
-            vol.Coerce(float), vol.Range(min=0.1, max=500.0)
-        )
+    schema[vol.Optional(CONF_EDIT_ASSETS, default=False)] = bool
     return vol.Schema(schema)

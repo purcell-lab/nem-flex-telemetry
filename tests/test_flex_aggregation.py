@@ -98,6 +98,14 @@ def _install_ha_stubs() -> None:
 
 _install_ha_stubs()
 
+# The stubs below replace real modules. Remember what was loaded so they can
+# be put back once the coordinator is imported: otherwise they leak into
+# tests/ha when the whole tests/ tree runs in one process.
+_STUBBED_PREFIXES = ("custom_components", "aiohttp")
+_saved_modules = {
+    name: mod for name, mod in sys.modules.items() if name.startswith(_STUBBED_PREFIXES)
+}
+
 # Stub aiohttp (only imported for type hints)
 sys.modules.setdefault("aiohttp", types.ModuleType("aiohttp"))
 # voluptuous schema validators are referenced at module import
@@ -131,6 +139,12 @@ sys.modules["custom_components.nem_flex_telemetry.discovery"] = discovery
 
 # Now safe to import the coordinator module.
 from custom_components.nem_flex_telemetry import coordinator as coord_module  # noqa: E402
+
+for _name in [n for n in sys.modules if n.startswith(_STUBBED_PREFIXES)]:
+    if _name in _saved_modules:
+        sys.modules[_name] = _saved_modules[_name]
+    else:
+        del sys.modules[_name]
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +182,9 @@ def make_coordinator(state_map: dict[str, float | str]):
     # These tests exercise the post-startup behaviour (#21): outside the
     # grace period a missing rating is a WARNING.
     coord._intervals_seen = coord_module.STARTUP_GRACE_INTERVALS + 1
-    coord._last_bidirectional_ev_id = None
+    # Reference stack: one bidirectional DCEV charger shared by both EVs.
+    coord._bidirectional_chargers = 1
+    coord._bidirectional_holders = []
     return coord
 
 
@@ -265,13 +281,13 @@ def test_dcev_allocator_only_one_ev_at_a_time():
     )
     assert up1 == 25.0
     assert up2 == 0.0  # ev1 is sticky owner; ev2 gets nothing
-    assert coord._last_bidirectional_ev_id == "ev1"
+    assert coord._bidirectional_holders == ["ev1"]
 
 
 def test_dcev_allocator_respects_existing_sticky_owner():
     """If ev2 was the previous bidirectional user, ev1 yields to it."""
     coord = make_coordinator(MARKS_STACK)
-    coord._last_bidirectional_ev_id = "ev2"
+    coord._bidirectional_holders = ["ev2"]
     up1, _ = coord._ev_asset_flex(
         "ev1", 0.0, "plugged_idle", "charge_only"
     )
@@ -444,3 +460,56 @@ def test_health_check_treats_unavailable_as_fallback(caplog):
         coord._log_power_rating_health_check()
     assert "hybrid inverter AC->DC -> 30.0 kW (FALLBACK" in caplog.text
     assert "5 live, 1 fallback" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Configurable bidirectional chargers (#15)
+# ---------------------------------------------------------------------------
+def test_two_chargers_serve_two_evs():
+    coord = make_coordinator(MARKS_STACK)
+    coord._bidirectional_chargers = 2
+    up1, _ = coord._ev_asset_flex("ev1", 0.0, "plugged_idle", "charge_only")
+    up2, _ = coord._ev_asset_flex("ev2", 0.0, "plugged_idle", "charge_only")
+    assert (up1, up2) == (25.0, 25.0)
+    assert coord._bidirectional_holders == ["ev1", "ev2"]
+
+
+def test_unplugged_holder_releases_charger():
+    """The shared charger is freed when its EV leaves, so the other EV can use it."""
+    coord = make_coordinator(MARKS_STACK)
+    coord._bidirectional_holders = ["ev1"]
+    assert coord._ev_asset_flex("ev1", 0.0, "driving", "none") == (0.0, 0.0)
+    up2, _ = coord._ev_asset_flex("ev2", 0.0, "plugged_idle", "charge_only")
+    assert up2 == 25.0
+    assert coord._bidirectional_holders == ["ev2"]
+
+
+def test_ev_without_bidirectional_charger_is_charge_only():
+    """No bidirectional charger: the EV charges on its own, no V2G."""
+    coord = make_coordinator(MARKS_STACK)
+    coord._bidirectional_chargers = 0
+    up, down = coord._ev_asset_flex("ev1", 2.0, "charging", "bidirectional")
+    assert up == pytest.approx(coord_module.DEFAULT_EV_MAX_CHARGE_KW - 2.0)
+    assert down == 0.0
+    assert coord._bidirectional_holders == []
+
+
+def test_ev_not_capable_does_not_take_the_charger():
+    coord = make_coordinator(MARKS_STACK)
+    up1, down1 = coord._ev_asset_flex(
+        "ev1", 0.0, "plugged_idle", "charge_only", bidirectional_capable=False
+    )
+    up2, _ = coord._ev_asset_flex("ev2", 0.0, "plugged_idle", "charge_only")
+    assert (up1, down1) == (coord_module.DEFAULT_EV_MAX_CHARGE_KW, 0.0)
+    assert up2 == 25.0
+    assert coord._bidirectional_holders == ["ev2"]
+
+
+def test_discharge_hands_over_the_only_charger():
+    from datetime import UTC, datetime
+
+    coord = make_coordinator(MARKS_STACK)
+    coord._last_discharge_time = {}
+    coord._bidirectional_holders = ["ev1"]
+    coord._record_discharge("ev2", datetime.now(UTC))
+    assert coord._bidirectional_holders == ["ev2"]

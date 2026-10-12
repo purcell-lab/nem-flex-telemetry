@@ -106,13 +106,26 @@ A Nimbus record is relayed unchanged, and only if its `region` and `postcode_pre
 
 ## Step 6: Asset configuration
 
-The config flow shows a summary of the discovered assets (home battery, EV1, EV2) and asks for their energy capacities:
+The config flow first asks how many assets the household has. Any of these can be 0:
 
-- **Home battery capacity (kWh):** default 13.5 kWh. Adjust to your battery's usable capacity.
-- **EV1 capacity (kWh):** default 75.0 kWh. Adjust to your first EV's usable battery size.
-- **EV2 capacity (kWh):** default 60.0 kWh. Adjust to your second EV's usable battery size.
+- **Number of home batteries**
+- **Number of EVs**
+- **Number of bidirectional (V2G) EV chargers:** chargers that can also discharge an EV. Enter 0 if every EV has a charge-only charger.
 
-These are used to compute per-asset kWh stored in the `assets[]` array. HAEO does not always expose these values directly, so they are asked once during setup.
+The counts are pre-filled from the battery and EV entities found on this instance. Then there is one step for each battery and each EV:
+
+- **Usable capacity (kWh):** set it to 0, or leave it blank, if the asset does not exist. It is then left out.
+- **State of charge (%):** required when a capacity is set.
+- **Power setpoint (kW)** and **HAEO power balance shadow price:** optional.
+- **This EV can use the bidirectional charger(s)** (EVs only, shown when there is at least one bidirectional charger). EVs that cannot use one are counted as charge-only.
+
+Entities that HAEO publishes under its usual names (for example `sensor.ev1_state_of_charge`) are pre-filled. Capacity is used to compute per-asset kWh in the `assets[]` array. HAEO does not always expose it, so it is asked here.
+
+Only the configured assets are published. If an asset's state of charge entity does not exist, that asset is left out of the record and one warning is logged.
+
+To change the assets later, go to Settings > Devices and Services > NEM Flex Telemetry > Configure and tick **Edit batteries and EVs**.
+
+Existing installs keep their home battery, EV1 and EV2 with the same entities and capacities. An asset that was entered with the old 0.1 kWh placeholder is removed when the integration updates.
 
 **Note on connection state:** The integration infers EV plug state from shadow prices and setpoints. It does not require any `binary_sensor` plug entity. See [SCHEMA.md](../SCHEMA.md#connection-state-inference) for the inference rules.
 
