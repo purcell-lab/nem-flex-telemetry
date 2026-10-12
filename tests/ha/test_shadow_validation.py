@@ -82,15 +82,27 @@ async def test_dual_outside_guard_is_rejected(hass: HomeAssistant) -> None:
     assert c._data.validation_errors == 1
 
 
-async def test_market_price_window_unchanged(hass: HomeAssistant) -> None:
-    """Market prices keep the -2.0 to 20.0 window."""
+async def test_market_price_window(hass: HomeAssistant) -> None:
+    """Market prices use the -2.0 to 30.0 window."""
     c = _coordinator(hass)
     _set_required(hass)
     record = _base_record(c)
-    record["price_signal_seen"] = 25.0
+    record["price_signal_seen"] = 35.0
     await _tick_with(c, record)
     assert len(c._buffer) == 0
     assert c._data.validation_errors == 1
+
+
+async def test_price_spike_above_old_cap_accepted(hass: HomeAssistant) -> None:
+    """A $23/kWh export at the market price cap is kept, not skipped."""
+    c = _coordinator(hass)
+    _set_required(hass)
+    record = _base_record(c)
+    record["price_signal_seen"] = 23.5
+    record["price_export_seen"] = 23.0
+    await _tick_with(c, record)
+    assert len(c._buffer) == 1
+    assert c._data.validation_errors == 0
 
 
 async def test_asset_power_balance_dual(hass: HomeAssistant) -> None:
@@ -117,14 +129,14 @@ async def test_validation_errors_persist(hass: HomeAssistant) -> None:
 
 
 def test_json_schema_accepts_duals_and_keeps_price_window() -> None:
-    """validate.yml uses this schema: duals widened, market prices unchanged."""
+    """validate.yml uses this schema: duals widened, market price window to 30."""
     props = SCHEMA["properties"]
     for f in SHADOW_FIELDS:
         assert props[f]["minimum"] == -1000.0 and props[f]["maximum"] == 1000.0
     asset = props["assets"]["items"]["properties"]["shadow_power_balance_price"]
     assert asset["minimum"] == -1000.0 and asset["maximum"] == 1000.0
     for f in ("price_signal_seen", "price_export_seen"):
-        assert props[f]["minimum"] == -2.0 and props[f]["maximum"] == 20.0
+        assert props[f]["minimum"] == -2.0 and props[f]["maximum"] == 30.0
     sub = jsonschema.Draft202012Validator(props["shadow_energy_price"])
     assert sub.is_valid(-9.768686)
     assert not sub.is_valid(-9768.686)

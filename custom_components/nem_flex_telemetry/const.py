@@ -9,8 +9,16 @@ PLATFORMS: list[str] = ["sensor"]
 
 VERSION = "0.7.1"
 
+# Market price window (price_signal_seen, price_export_seen), in $/kWh. The
+# NEM market price cap is $20.70/kWh in 2026-27 and is indexed to CPI each
+# year; retail prices add GST and network charges on top, so spike intervals
+# can exceed $20/kWh. 30.0 leaves room for that growth while still rejecting
+# $/MWh values at spike levels. Keep in step with the JSON schema.
+MARKET_PRICE_MIN = -2.0
+MARKET_PRICE_MAX = 30.0
+
 # Sanity guard for LP duals (shadow_* fields), in $/kWh. Duals are not market
-# prices and are not bounded by the -2.0 to 20.0 price window (#30); this guard
+# prices and are not bounded by the market price window (#30); this guard
 # only catches unit errors and garbage. Keep in step with the JSON schema.
 SHADOW_PRICE_MIN = -1000.0
 SHADOW_PRICE_MAX = 1000.0

@@ -84,14 +84,14 @@
     "price_signal_seen": {
       "type": "number",
       "minimum": -2.0,
-      "maximum": 20.0,
-      "description": "Buy price signal seen by the optimiser ($/kWh). Range -2.0 to 20.0 covers extreme negative-FiT events to capacity-price spikes.",
+      "maximum": 30.0,
+      "description": "Buy price signal seen by the optimiser ($/kWh). Range -2.0 to 30.0 covers extreme negative-FiT events and retail prices at the market price cap, with headroom for CPI indexation.",
       "examples": [0.0875, 0.30, -0.015]
     },
     "price_export_seen": {
       "type": "number",
       "minimum": -2.0,
-      "maximum": 20.0,
+      "maximum": 30.0,
       "description": "Sell/export price seen by the optimiser ($/kWh). Positive = FiT earned; negative = negative-FiT event.",
       "examples": [0.05, -0.005, 0.12]
     },

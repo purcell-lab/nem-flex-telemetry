@@ -28,7 +28,7 @@ The `validate.yml` Action enforces:
 - The committed paths must be exactly `data/raw/<commit-author-login>/**` and nowhere else.
 - Every record must pass schema v2.0 validation (JSON Schema + jsonschema library).
 - `schema_version` must equal `'2.0'`. Records with any other value are rejected outright.
-- All price fields (`price_signal_seen`, `price_export_seen`, and all shadow price fields) must be within the $/kWh range of -2.0 to 20.0. This range check is an additional anti-injection guard: a compromised instance that somehow emitted $/MWh values (e.g. 8750 instead of 0.0875) would be caught here before entering the cohort. Records outside this range cannot represent plausible $/kWh prices under any NEM scenario.
+- All price fields (`price_signal_seen`, `price_export_seen`, and all shadow price fields) must be within the $/kWh range of -2.0 to 30.0. This range check is an additional anti-injection guard: a compromised instance that somehow emitted $/MWh values (e.g. 8750 instead of 0.0875) would be caught here before entering the cohort. Records outside this range cannot represent plausible $/kWh prices under any NEM scenario.
 - Records must not be backdated more than 7 days from the current UTC date.
 - Any commit that fails these checks is reverted by a follow-up bot commit.
 
@@ -44,7 +44,7 @@ The `validate.yml` Action enforces:
 
 **Hostile household attempting to write to other folders.** The CI path-scope guard rejects any commit where changed paths include paths outside `data/raw/<authenticated-login>/**`.
 
-**Hostile household injecting bad data into their own folder.** Schema validation confirms field types, $/kWh ranges, and schema\_version. The $/kWh range check (-2.0 to 20.0) is the primary price-injection guard: it prevents any record with implausible prices from entering the cohort. A record claiming a price of 8750 $/kWh would fail with a clear error message explaining that prices must be in $/kWh, not $/MWh.
+**Hostile household injecting bad data into their own folder.** Schema validation confirms field types, $/kWh ranges, and schema\_version. The $/kWh range check (-2.0 to 30.0) is the primary price-injection guard: it prevents any record with implausible prices from entering the cohort. A record claiming a price of 8750 $/kWh would fail with a clear error message explaining that prices must be in $/kWh, not $/MWh.
 
 **Token leak via HA logs.** The integration never logs the OAuth token at any level.
 
