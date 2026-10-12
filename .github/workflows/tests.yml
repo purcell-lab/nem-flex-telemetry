@@ -36,6 +36,11 @@ jobs:
       - name: Install test dependencies
         run: pip install -r requirements-test.txt
 
+      # manifest.json, VERSION in const.py and the README status line must agree;
+      # release.yml refuses to tag otherwise.
+      - name: Version lockstep
+        run: python scripts/version_lockstep.py
+
       # The two suites run in separate processes. test_flex_aggregation.py
       # installs Home Assistant stubs into sys.modules, which would break the
       # real Home Assistant core used by tests/ha.
