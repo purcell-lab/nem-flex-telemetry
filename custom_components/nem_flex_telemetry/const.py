@@ -7,7 +7,7 @@ import re
 DOMAIN = "nem_flex_telemetry"
 PLATFORMS: list[str] = ["sensor"]
 
-VERSION = "0.7.2"
+VERSION = "0.7.3"
 
 # Market price window (price_signal_seen, price_export_seen), in $/kWh. The
 # NEM market price cap is $20.70/kWh in 2026-27 and is indexed to CPI each
