@@ -166,5 +166,29 @@
       "title": "NEM Flex Telemetry cannot push data",
       "description": "Your GitHub account does not have write access to `{repo}`, so records are being kept locally and retried each hour (up to 24 hours). Ask the maintainer to invite your account, then accept the invitation from GitHub. This message clears after the next successful push."
     }
+  },
+  "services": {
+    "manual_push": {
+      "name": "Manual push",
+      "description": "Force an immediate push of the current record buffer to the central GitHub repository. Useful for testing that your PAT and entity mappings are correct. Under normal operation, pushes happen automatically every hour."
+    },
+    "rebuild_intervals": {
+      "name": "Rebuild missed intervals",
+      "description": "Rebuild 5-minute records that are missing from the central repository, using the Home Assistant recorder history of the entities this integration reads, and push them. Intervals already published are left alone. Only intervals still inside the recorder's retention (purge_keep_days, 10 days by default) can be rebuilt.",
+      "fields": {
+        "start": {
+          "name": "Start",
+          "description": "First interval to check. Defaults to 10 days ago (or the recorder's retention if shorter), but never before the household's first published record."
+        },
+        "end": {
+          "name": "End",
+          "description": "Check intervals that start before this time. Defaults to the start of the current interval."
+        },
+        "dry_run": {
+          "name": "Dry run",
+          "description": "Report what would be rebuilt without pushing anything."
+        }
+      }
+    }
   }
 }
