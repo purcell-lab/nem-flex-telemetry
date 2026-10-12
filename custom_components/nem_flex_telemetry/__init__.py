@@ -13,12 +13,20 @@ Repo: https://github.com/purcell-lab/nem-flex-telemetry
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import (
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+)
+from homeassistant.helpers import config_validation as cv
+from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_ENTITY_SHADOW_ENERGY,
@@ -26,11 +34,43 @@ from .const import (
     DOMAIN,
     PLATFORMS,
     SERVICE_MANUAL_PUSH,
+    SERVICE_REBUILD_INTERVALS,
     VERSION,
 )
 from .coordinator import NemFlexTelemetryCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+REBUILD_SCHEMA = vol.Schema(
+    {
+        vol.Optional("start"): cv.datetime,
+        vol.Optional("end"): cv.datetime,
+        vol.Optional("dry_run", default=False): cv.boolean,
+    }
+)
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    """Read a service datetime; a naive value is in the HA time zone."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=dt_util.get_default_time_zone())
+    return dt_util.as_utc(value)
+
+
+async def _async_handle_rebuild(hass: HomeAssistant, call: ServiceCall) -> ServiceResponse:
+    """Rebuild unpublished intervals from recorder history for every entry."""
+    households: dict[str, dict] = {}
+    for coordinator in list(hass.data.get(DOMAIN, {}).values()):
+        households[coordinator.household_id] = await coordinator.async_rebuild_intervals(
+            start=_as_utc(call.data.get("start")),
+            end=_as_utc(call.data.get("end")),
+            dry_run=call.data["dry_run"],
+        )
+    if not call.return_response:
+        return None
+    return {"households": households}
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -93,6 +133,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Nimbus source (#27): relay each record as Nimbus publishes it.
     if coordinator.async_start_nimbus_listener():
         entry.async_on_unload(coordinator.async_stop_nimbus_listener)
+    # Once per integration version, rebuild missed intervals from recorder
+    # history in the background (see rebuild.py).
+    coordinator.async_schedule_backfill()
 
     # Home Assistant does not unload entries on stop, so save the buffer and
     # attempt a final push when it stops (#18).
@@ -126,6 +169,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             schema=vol.Schema({}),
         )
 
+    if not hass.services.has_service(DOMAIN, SERVICE_REBUILD_INTERVALS):
+        async def handle_rebuild(call: ServiceCall) -> ServiceResponse:
+            return await _async_handle_rebuild(hass, call)
+
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_REBUILD_INTERVALS,
+            handle_rebuild,
+            schema=REBUILD_SCHEMA,
+            supports_response=SupportsResponse.OPTIONAL,
+        )
+
     _LOGGER.info(
         "NEM Flex Telemetry v%s set up for household '%s' in region %s (schema v2.0)",
         VERSION,
@@ -152,5 +207,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Remove service only when the last entry is unloaded
     if not hass.data[DOMAIN]:
         hass.services.async_remove(DOMAIN, SERVICE_MANUAL_PUSH)
+        hass.services.async_remove(DOMAIN, SERVICE_REBUILD_INTERVALS)
 
     return unload_ok

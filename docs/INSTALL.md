@@ -186,6 +186,33 @@ Shadow prices require HAEO v0.3 or later and are optional. Null is valid. If you
 - If a required input (net import, solar, house load, buy price or sell price) is unavailable, the interval is skipped rather than published as zeros. After the first 15 minutes from startup, one WARNING names the field and entity, and the `skipped_intervals` attribute counts the skipped intervals. Unavailable optional numeric entities default to 0.0, and unavailable shadow price entities become null.
 - If a record fails validation, for example a market price outside -2.0 to 30.0 $/kWh, or a shadow price outside the -1000 to 1000 sanity guard, the interval is skipped and counted in the `validation_errors` attribute. That count is kept across restarts. One WARNING names each failing field. Shadow prices are LP duals, not market prices, and can reach several $/kWh when a constraint binds, for example a full battery at the export limit. They are accepted (#30).
 
+### Recovering missed intervals
+
+Intervals can be missing from your day files because Home Assistant restarted, a push kept failing for longer than the 24-hour buffer, an input was briefly unavailable, or a record failed validation. Until #37 raised the market price window to $30/kWh, intervals with a market price above $20/kWh were rejected this way. The integration can rebuild these intervals from the Home Assistant recorder history of the same entities it reads live, as long as the recorder still has that history.
+
+**Deadline:** the recorder keeps history for `purge_keep_days`, which is 10 days by default. An interval older than that cannot be rebuilt. Recover missed intervals within that time.
+
+**Automatic:** the first time Home Assistant starts with a new version of the integration, it checks the last 10 days in the background (or less if your recorder keeps less, and never before your first published record or your consent). It waits for Home Assistant to finish starting and for the required inputs to publish (at most 15 minutes), then pushes any intervals it could rebuild. One INFO log line summarises the result. If GitHub could not be read or the push failed, it tries again at the next start.
+
+**Manually:** call the `nem_flex_telemetry.rebuild_intervals` service from **Developer Tools > Actions**:
+
+```yaml
+action: nem_flex_telemetry.rebuild_intervals
+data:
+  start: "2026-10-10 07:00:00"   # optional, Home Assistant time zone
+  end: "2026-10-10 08:00:00"     # optional
+  dry_run: true                  # report only, push nothing
+```
+
+Without `start` and `end` it checks the same window as the automatic run. Tick **Return response** to see the summary: intervals checked, already published, rebuilt (with their times), pushed, and skipped with a reason for each, such as no recorder history or a required input unavailable at the time. Run it with `dry_run: true` first if you want to see what would be pushed.
+
+How rebuilt intervals compare with live ones:
+
+- Each entity is read as it was at the same point in the interval at which the live integration reads it, and the record goes through the same required-input check and validation. Intervals already in your day files or still in the local buffer are never rebuilt, and the push skips any interval that reached GitHub in the meantime.
+- EV connection state and the charger allocation depend on earlier intervals. They are replayed from the recorder starting one hour before each gap, so they can differ from what the live integration would have published if it had been running without interruption for longer than that.
+- Entities excluded from the recorder (`recorder: exclude:` in `configuration.yaml`) have no history. If a required input is excluded, those intervals are skipped. Excluded optional entities are treated as unavailable, as they would be live.
+- With the Nimbus source, the record is taken from the history of `sensor.nimbus_flex_telemetry` (its `record` attribute). The recorder drops attributes larger than 16 KB, and Nimbus only publishes while flex ranging is on, so some intervals may have no record to recover.
+
 ### "Token invalid" notification appears
 
 Your OAuth token has been revoked or expired. Click the notification or go to Settings > Devices and Services, find NEM Flex Telemetry, and click **Re-authenticate** to run Device Flow again.

@@ -91,6 +91,15 @@ UPDATE_INTERVAL_SECONDS = 300   # 5-minute poll interval
 PUSH_INTERVAL_SECONDS = 3600    # 1-hour push interval
 RECORDS_PER_PUSH = 12           # 12 x 5-min intervals = 1 hour
 
+# Rebuilding missed intervals from recorder history. The window reaches back
+# at most this many days, matching the recorder's default purge_keep_days,
+# and is clamped to the recorder's actual retention when that is shorter.
+BACKFILL_MAX_DAYS = 10
+# The automatic backfill after an update waits for Home Assistant to start
+# and for the required inputs to publish, but no longer than this; it reads
+# history, so it can run without live states.
+BACKFILL_READY_TIMEOUT_SECONDS = 900
+
 # ---------------------------------------------------------------------------
 # GitHub repo details
 # ---------------------------------------------------------------------------
@@ -109,6 +118,7 @@ SENSOR_COHORT_SIZE = "cohort_size"
 # Service names
 # ---------------------------------------------------------------------------
 SERVICE_MANUAL_PUSH = "manual_push"
+SERVICE_REBUILD_INTERVALS = "rebuild_intervals"
 
 # ---------------------------------------------------------------------------
 # Schema version

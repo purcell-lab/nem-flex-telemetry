@@ -6,6 +6,7 @@ minimal and all I/O async-native.
 
 Operations:
 - Append-or-create JSONL files at data/raw/<household_id>/YYYY/MM/DD.jsonl
+- Read which intervals a household has already published (history rebuild)
 - Retry logic with exponential backoff
 - Rate-limit awareness (respects X-RateLimit-Remaining response headers)
 - Token verification (defence against token swap after reauth)
@@ -21,7 +22,8 @@ import asyncio
 import base64
 import json
 import logging
-from datetime import UTC, datetime
+from collections.abc import Iterable
+from datetime import UTC, date, datetime
 from typing import Any
 
 import aiohttp
@@ -360,6 +362,108 @@ class NemFlexGitHubClient:
         raise GitHubPushError(
             f"Failed to push {file_path} after {MAX_RETRIES} attempts: {last_exc}"
         ) from last_exc
+
+    def _raw_day_path(self, household_id: str, day: date) -> str:
+        """Repository path of one household day file (UTC date)."""
+        return f"data/raw/{household_id}/{day:%Y/%m/%d}.jsonl"
+
+    async def read_published_intervals(
+        self, household_id: str, days: Iterable[date]
+    ) -> dict[date, set[str] | None]:
+        """Return the ``interval_start_utc`` values already in each day file.
+
+        Each day file is fetched once, raw (so files over 1 MB work), in one
+        session after one rate-limit check. A day with no file maps to an
+        empty set; a day that could not be read maps to None so the caller
+        can leave its intervals alone rather than guess.
+
+        Raises:
+            TokenInvalidError: If the token is rejected (HTTP 401).
+        """
+        headers = {**self._headers, "Accept": "application/vnd.github.raw+json"}
+        result: dict[date, set[str] | None] = {}
+        async with aiohttp.ClientSession(headers=headers) as session:
+            await self._check_rate_limit(session)
+            for day in sorted(set(days)):
+                path = self._raw_day_path(household_id, day)
+                url = self._url(f"/repos/{self._repo_name}/contents/{path}")
+                try:
+                    async with session.get(url) as resp:
+                        if resp.status == 401:
+                            raise TokenInvalidError(
+                                "GitHub rejected the stored token (HTTP 401)."
+                            )
+                        if resp.status == 404:
+                            result[day] = set()
+                            continue
+                        if resp.status != 200:
+                            _LOGGER.warning(
+                                "Could not read %s: HTTP %s", path, resp.status
+                            )
+                            result[day] = None
+                            continue
+                        text = await resp.text()
+                except TokenInvalidError:
+                    raise
+                except Exception as exc:  # pylint: disable=broad-except
+                    _LOGGER.warning("Could not read %s: %s", path, exc)
+                    result[day] = None
+                    continue
+                intervals: set[str] = set()
+                for line in text.splitlines():
+                    try:
+                        intervals.add(json.loads(line)["interval_start_utc"])
+                    except (ValueError, KeyError, TypeError):
+                        continue
+                result[day] = intervals
+        return result
+
+    async def first_published_date(self, household_id: str) -> date | None:
+        """Return the UTC date of the household's earliest day file.
+
+        Walks data/raw/<household_id>/ (year, then month, then day: three
+        directory listings). Returns None when the household has never
+        published.
+
+        Raises:
+            TokenInvalidError: If the token is rejected (HTTP 401).
+            GitHubPushError: If a listing could not be read.
+        """
+        parts: list[int] = []
+        try:
+            async with aiohttp.ClientSession(headers=self._headers) as session:
+                for _level in ("year", "month", "day"):
+                    path = "/".join([f"data/raw/{household_id}", *(f"{p:02d}" for p in parts)])
+                    url = self._url(f"/repos/{self._repo_name}/contents/{path}")
+                    async with session.get(url) as resp:
+                        if resp.status == 401:
+                            raise TokenInvalidError(
+                                "GitHub rejected the stored token (HTTP 401)."
+                            )
+                        if resp.status == 404:
+                            return None
+                        if resp.status != 200:
+                            raise GitHubPushError(
+                                f"GitHub GET {path} returned HTTP {resp.status}"
+                            )
+                        entries = await resp.json()
+                    names = sorted(
+                        int(e["name"].removesuffix(".jsonl"))
+                        for e in entries
+                        if isinstance(e, dict)
+                        and e.get("name", "").removesuffix(".jsonl").isdigit()
+                    )
+                    if not names:
+                        return None
+                    parts.append(names[0])
+        except (TokenInvalidError, GitHubPushError):
+            raise
+        except aiohttp.ClientError as exc:
+            raise GitHubPushError(f"Network error listing {household_id}: {exc}") from exc
+        try:
+            return date(parts[0], parts[1], parts[2])
+        except ValueError:
+            return None
 
     async def get_cohort_size(self) -> int | None:
         """Return the cohort size published by the aggregation workflow.

@@ -11,6 +11,11 @@ Responsibilities:
 - Push the buffer to GitHub on the hour (every 12 records = 1 hour of data)
 - Expose status attributes to sensor.py
 - Trigger HA re-authentication when the stored OAuth token is rejected (401)
+- Rebuild unpublished intervals from recorder history (service, and once
+  per integration version in the background; see rebuild.py)
+
+The record field logic lives in record_builder.py so live and history
+rebuilds share it.
 
 All prices are stored in $/kWh (no /1000 conversion from v2.0 onwards).
 All GitHub I/O is async (aiohttp via NemFlexGitHubClient).
@@ -29,45 +34,25 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
 from .const import (
-    ASSET_DEFAULTS,
-    MARKET_PRICE_MAX,
-    MARKET_PRICE_MIN,
-    SHADOW_PRICE_MAX,
-    SHADOW_PRICE_MIN,
-    CONF_EV1_CAPACITY_KWH,
-    CONF_EV2_CAPACITY_KWH,
-    CONF_ENTITY_ENVELOPE_EXPORT,
-    CONF_ENTITY_ENVELOPE_IMPORT,
-    CONF_ENTITY_FLEX_DOWN,
-    CONF_ENTITY_FLEX_UP,
-    CONF_ENTITY_NET_IMPORT,
-    CONF_ENTITY_PRICE_EXPORT,
-    CONF_ENTITY_PRICE_SIGNAL,
-    CONF_ENTITY_SHADOW_ENERGY,
-    CONF_ENTITY_SHADOW_ENVELOPE_EXPORT,
-    CONF_ENTITY_SHADOW_ENVELOPE_IMPORT,
-    CONF_ENTITY_SHADOW_LOAD_FORECAST,
-    CONF_ENTITY_SHADOW_SOLAR_FORECAST,
-    CONF_ENTITY_SOLAR,
-    CONF_ENTITY_TOTAL_LOAD,
+    BACKFILL_MAX_DAYS,
+    BACKFILL_READY_TIMEOUT_SECONDS,
+    CONF_CONSENT_TIMESTAMP,
     CONF_GITHUB_LOGIN,
-    CONF_HOME_BATTERY_CAPACITY_KWH,
     CONF_HOUSEHOLD_ID,
-    CONF_POSTCODE_PREFIX,
-    CONF_REGION,
+    CONF_SOURCE,
     CONF_TOKEN,
     DEFAULT_BATTERY_MAX_CHARGE_KW,
     DEFAULT_BATTERY_MAX_DISCHARGE_KW,
     DEFAULT_DCEV_AC_TO_DC_KW,
     DEFAULT_DCEV_DC_TO_AC_KW,
-    DEFAULT_EV_MAX_CHARGE_KW,
-    DEFAULT_EV_MAX_DISCHARGE_KW,
     DEFAULT_INVERTER_AC_TO_DC_KW,
     DEFAULT_INVERTER_DC_TO_AC_KW,
     DOMAIN,
@@ -78,26 +63,45 @@ from .const import (
     ENTITY_INVERTER_AC_TO_DC,
     ENTITY_INVERTER_DC_TO_AC,
     GITHUB_REPO,
+    MARKET_PRICE_MAX,
+    MARKET_PRICE_MIN,
     NIMBUS_TELEMETRY_ENTITY,
     RECORDS_PER_PUSH,
     REQUIRED_ENTITY_FIELDS,
+    SCHEMA_VERSION,
+    SHADOW_PRICE_MAX,
+    SHADOW_PRICE_MIN,
     SOURCE_HAEO,
     SOURCE_NIMBUS,
-    CONF_SOURCE,
-    SCHEMA_VERSION,
     UPDATE_INTERVAL_SECONDS,
     VERSION,
 )
 from .discovery import discover_context_entities, run_global_sweep
-from .nimbus_source import read_nimbus_record
-from homeassistant.helpers import issue_registry as ir
-
 from .github_client import (
     GitHubPushError,
     NemFlexGitHubClient,
     PushPermissionError,
     TokenInvalidError,
 )
+from .nimbus_source import read_nimbus_record
+from .rebuild import (
+    DEFAULT_SAMPLE_OFFSET_S,
+    INTERVAL,
+    NIMBUS_PUBLISH_LAG,
+    REASON_DAY_UNREADABLE,
+    REASON_NO_HISTORY,
+    REASON_NO_NIMBUS_RECORD,
+    HistoricalRecordBuilder,
+    HistoryTimeline,
+    RebuildSummary,
+    async_fetch_history,
+    backfill_window,
+    chunks,
+    interval_starts,
+    recorder_keep_days,
+    replay_runs,
+)
+from .record_builder import RecordBuilder, format_interval, interval_start_for
 
 ISSUE_NO_PUSH_ACCESS = "no_push_access"
 
@@ -113,51 +117,6 @@ STOP_PUSH_TIMEOUT_S = 10.0               # best-effort push on HA stop
 # minutes to publish states after a restart. During this grace period
 # fallbacks and missing inputs are logged at DEBUG only.
 STARTUP_GRACE_INTERVALS = 3
-
-# EV connection state inference constants
-_SOC_DELTA_PLUGGED_IDLE_MAX = 0.5     # % per interval; below this = plugged_idle
-_SOC_DELTA_CHARGE_MIN = 1.0           # % per 5min; rising at this rate = charging
-_SOC_DELTA_DISCHARGE_MIN = 1.0        # % per 5min; falling at this rate = discharging
-_SOC_DELTA_DRIVING_MIN = 1.5          # % per 5min; rapid drop with no shadow = driving
-_BIDIRECTIONAL_STICKY_HOURS = 1       # hours; once seen discharging, stays bidirectional for this long
-
-
-def _read_state_float(
-    hass: HomeAssistant, entity_id: str | None, fallback: float | None = 0.0
-) -> float | None:
-    """Read a HA entity state as a float.
-
-    Returns fallback if entity_id is None, entity is absent, or state
-    is unavailable/unknown/unparseable.
-    """
-    if not entity_id:
-        return fallback
-    state = hass.states.get(entity_id)
-    if state is None or state.state in ("unavailable", "unknown", ""):
-        _LOGGER.debug("Entity %s is unavailable, using fallback %s", entity_id, fallback)
-        return fallback
-    try:
-        return float(state.state)
-    except ValueError:
-        _LOGGER.warning(
-            "Could not parse state '%s' from entity %s as float",
-            state.state,
-            entity_id,
-        )
-        return fallback
-
-
-def _read_state_float_or_none(hass: HomeAssistant, entity_id: str | None) -> float | None:
-    """Read a HA entity state as a float, returning None if unavailable."""
-    if not entity_id:
-        return None
-    state = hass.states.get(entity_id)
-    if state is None or state.state in ("unavailable", "unknown", ""):
-        return None
-    try:
-        return float(state.state)
-    except ValueError:
-        return None
 
 
 class CoordinatorData:
@@ -186,8 +145,12 @@ def entry_config(entry: ConfigEntry) -> dict[str, Any]:
     return {**entry.data, **entry.options}
 
 
-class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
-    """Coordinate 5-minute telemetry reads and hourly GitHub pushes."""
+class NemFlexTelemetryCoordinator(RecordBuilder, DataUpdateCoordinator[CoordinatorData]):
+    """Coordinate 5-minute telemetry reads and hourly GitHub pushes.
+
+    The record field logic lives in ``RecordBuilder``; the coordinator feeds
+    it live states from ``hass.states``.
+    """
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialise the coordinator."""
@@ -198,11 +161,11 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
             update_interval=timedelta(seconds=UPDATE_INTERVAL_SECONDS),
         )
         self.config_entry = entry
-        self._config = entry_config(entry)
+        # Configuration, region, postcode prefix, asset capacities and the
+        # cross-interval EV inference state (record_builder.RecordBuilder).
+        self._init_builder(entry_config(entry))
 
         self.household_id: str = self._config[CONF_HOUSEHOLD_ID]
-        self.region: str = self._config[CONF_REGION]
-        self._postcode_prefix: str = self._config[CONF_POSTCODE_PREFIX]
         self._github_login: str = self._config.get(CONF_GITHUB_LOGIN, "")
 
         # Record source (#27): build from mapped entities, or relay Nimbus.
@@ -227,9 +190,6 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._push_day: str | None = None
         self._cohort_checked: datetime | None = None
 
-        # Flex derivation logging gate
-        self._flex_derived_logged: bool = False
-
         # Power-rating health-check (#21): last known live/fallback status per
         # entity, so changes are logged and startup fallbacks are not reported
         # as permanent.
@@ -250,27 +210,20 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # Global sweep: re-run on every coordinator startup
         self._last_sweep_unmapped: list[str] = []
 
-        # Per-EV SOC history for connection state inference
-        # {asset_id: (prev_soc, prev_timestamp)}
-        self._ev_prev_soc: dict[str, tuple[float, datetime]] = {}
+        # History rebuild. Seconds into the interval at which the live
+        # builder reads states (its timer is not aligned to the clock), so a
+        # rebuilt interval reads history at the same moment. Persisted.
+        self._sample_offset_s: float | None = None
+        # Integration VERSION the automatic backfill last completed for.
+        self._backfill_version: str | None = None
+        # Set once a live interval has been built from ready inputs, so the
+        # automatic backfill reuses the startup-readiness check (#21).
+        self._inputs_ready = asyncio.Event()
+        self._rebuild_lock = asyncio.Lock()
 
-        # Bidirectional charger sticky tracking
-        # {asset_id: last_discharge_utc}
-        self._last_discharge_time: dict[str, datetime] = {}
-
-        # Which EV was last confirmed on the bidirectional charger
-        self._last_bidirectional_ev_id: str | None = None
-
-        # Asset capacity overrides from config (set in async_step_assets)
-        self._asset_capacity: dict[str, float] = {}
-        if CONF_HOME_BATTERY_CAPACITY_KWH in self._config:
-            self._asset_capacity["home_battery"] = float(
-                self._config[CONF_HOME_BATTERY_CAPACITY_KWH]
-            )
-        if CONF_EV1_CAPACITY_KWH in self._config:
-            self._asset_capacity["ev1"] = float(self._config[CONF_EV1_CAPACITY_KWH])
-        if CONF_EV2_CAPACITY_KWH in self._config:
-            self._asset_capacity["ev2"] = float(self._config[CONF_EV2_CAPACITY_KWH])
+    def _get_state(self, entity_id: str) -> Any:
+        """Live state lookup for the record builder."""
+        return self.hass.states.get(entity_id)
 
     def _get_or_create_github_client(self) -> NemFlexGitHubClient:
         """Return the GitHub client, creating it if needed."""
@@ -280,63 +233,6 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 repo_name=GITHUB_REPO,
             )
         return self._github_client
-
-    def _read_number_kw(self, entity_id: str, default_kw: float) -> float:
-        """Read a number.* power-rating entity in kW, with default fallback.
-
-        Used for battery / inverter / DCEV charger power ratings.
-        """
-        state = self.hass.states.get(entity_id)
-        if state is not None and state.state not in ("unavailable", "unknown", ""):
-            try:
-                return abs(float(state.state))
-            except ValueError:
-                pass
-        return default_kw
-
-    def _read_battery_max_charge(self) -> float:
-        return self._read_number_kw(
-            ENTITY_BATTERY_MAX_CHARGE, DEFAULT_BATTERY_MAX_CHARGE_KW
-        )
-
-    def _read_battery_max_discharge(self) -> float:
-        return self._read_number_kw(
-            ENTITY_BATTERY_MAX_DISCHARGE, DEFAULT_BATTERY_MAX_DISCHARGE_KW
-        )
-
-    def _read_inverter_ac_to_dc(self) -> float:
-        return self._read_number_kw(
-            ENTITY_INVERTER_AC_TO_DC, DEFAULT_INVERTER_AC_TO_DC_KW
-        )
-
-    def _read_inverter_dc_to_ac(self) -> float:
-        return self._read_number_kw(
-            ENTITY_INVERTER_DC_TO_AC, DEFAULT_INVERTER_DC_TO_AC_KW
-        )
-
-    def _read_dcev_ac_to_dc(self) -> float:
-        return self._read_number_kw(ENTITY_DCEV_AC_TO_DC, DEFAULT_DCEV_AC_TO_DC_KW)
-
-    def _read_dcev_dc_to_ac(self) -> float:
-        return self._read_number_kw(ENTITY_DCEV_DC_TO_AC, DEFAULT_DCEV_DC_TO_AC_KW)
-
-    def _resolve_number_kw(
-        self, entity_id: str, default_kw: float
-    ) -> tuple[float, bool]:
-        """Read a number.* entity, returning (value_kw, is_live).
-
-        is_live=True means the entity exists and parsed cleanly; is_live=False
-        means we fell back to the compile-time default. Used by the startup
-        health-check log so the user can see at a glance which power-rating
-        sensors resolved live vs fell back to constants.
-        """
-        state = self.hass.states.get(entity_id)
-        if state is not None and state.state not in ("unavailable", "unknown", ""):
-            try:
-                return abs(float(state.state)), True
-            except ValueError:
-                pass
-        return default_kw, False
 
     def _log_power_rating_health_check(self) -> None:
         """Log which power-rating entities are live and which use fallbacks.
@@ -393,437 +289,6 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 live_count, len(checks) - live_count,
             )
             self._power_ratings_logged = True
-
-    def _missing_required_inputs(self) -> list[str]:
-        """Return required entity fields whose entity has no usable state."""
-        missing: list[str] = []
-        for field in REQUIRED_ENTITY_FIELDS:
-            entity_id = self._config.get(field)
-            if _read_state_float_or_none(self.hass, entity_id) is None:
-                missing.append(f"{field}={entity_id or 'not mapped'}")
-        return missing
-
-    def _battery_asset_flex(
-        self, battery_setpoint_kw: float
-    ) -> tuple[float, float]:
-        """Per-asset battery flex headroom, raw battery rating only.
-
-        Reports the battery's own DC-side limits as published by
-        number.battery_max_charge_power / number.battery_max_discharge_power.
-        The hybrid inverter ceiling is applied at the household level in
-        _build_record, NOT here, because the inverter is shared with PV and
-        DCEV flow paths.
-
-        Returns (available_up_kw, available_down_kw), both >= 0.
-        """
-        max_charge = self._read_battery_max_charge()
-        max_discharge = self._read_battery_max_discharge()
-        current_charge_rate = max(0.0, battery_setpoint_kw)
-        current_discharge_rate = max(0.0, -battery_setpoint_kw)
-        return (
-            max(0.0, max_charge - current_charge_rate),
-            max(0.0, max_discharge - current_discharge_rate),
-        )
-
-    def _ev_asset_flex(
-        self,
-        asset_id: str,
-        ev_setpoint_kw: float,
-        connection_state: str,
-        power_flow_capability: str,
-    ) -> tuple[float, float]:
-        """Per-asset EV flex headroom, gated by DCEV charger allocation.
-
-        Allocation rule: the household has ONE DCEV bidirectional charger shared
-        across both EVs. Only the EV currently allocated the charger contributes
-        flex; the other gets (0, 0). Allocation rule (sticky):
-          - If self._last_bidirectional_ev_id is set and matches asset_id, this
-            EV holds the charger.
-          - Else the first plugged EV in iteration order wins. _build_record
-            iterates ASSET_DEFAULTS deterministically so this is stable.
-
-        Connection state gating:
-          - 'unplugged' / 'driving' -> (0, 0): EV not present.
-          - 'charge_only' -> available_down = 0 (no V2G).
-          - 'bidirectional' -> both directions available.
-          - 'plugged_idle' / 'charging' / 'discharging' -> use
-            power_flow_capability to decide if down is available.
-
-        Returns (available_up_kw, available_down_kw), both >= 0.
-        """
-        if connection_state in ("unplugged", "driving"):
-            return 0.0, 0.0
-
-        # DCEV allocation: only the sticky owner gets the charger.
-        if (
-            self._last_bidirectional_ev_id is not None
-            and self._last_bidirectional_ev_id != asset_id
-        ):
-            return 0.0, 0.0
-        if self._last_bidirectional_ev_id is None:
-            # No sticky owner yet. Claim it for the first plugged EV.
-            self._last_bidirectional_ev_id = asset_id
-
-        max_charge = self._read_dcev_ac_to_dc()
-        max_discharge = self._read_dcev_dc_to_ac()
-
-        current_charge_rate = max(0.0, ev_setpoint_kw)
-        current_discharge_rate = max(0.0, -ev_setpoint_kw)
-
-        available_up = max(0.0, max_charge - current_charge_rate)
-        if power_flow_capability == "bidirectional":
-            available_down = max(0.0, max_discharge - current_discharge_rate)
-        else:
-            # charge_only or none: V2G not available, but charge headroom is.
-            available_down = 0.0
-
-        return available_up, available_down
-
-    def _derive_flex_headroom(self, battery_setpoint_kw: float) -> tuple[float, float]:
-        """Battery-only flex headroom (legacy fallback path).
-
-        Used only when ``_build_record`` cannot aggregate per-asset flex (e.g.
-        if asset records were not built this interval). Cohort flex is normally
-        computed from the per-asset sum in ``_build_record`` itself.
-        """
-        if not self._flex_derived_logged:
-            _LOGGER.info(
-                "flex_available_up/down derived per-asset (battery + DCEV-allocated EVs) "
-                "clipped to grid envelope. See _build_record for the sum-and-clip path."
-            )
-            self._flex_derived_logged = True
-
-        return self._battery_asset_flex(battery_setpoint_kw)
-
-    def _infer_ev_connection_state(
-        self,
-        asset_id: str,
-        shadow: float | None,
-        setpoint_kw: float | None,
-        current_soc: float,
-        now: datetime,
-    ) -> tuple[str, str]:
-        """Infer EV connection_state and power_flow_capability for one interval.
-
-        Connection state inference rules (see spec section 6):
-        - shadow is None/unavailable -> 'unplugged'
-        - shadow present AND setpoint is None or ~0 AND SOC delta < 0.5% -> 'plugged_idle'
-        - setpoint > 0 OR SOC rising > 1%/5min -> 'charging'
-        - setpoint < 0 OR SOC falling > 1%/5min (while not driving) -> 'discharging'
-        - shadow unavailable AND SOC dropping > 1.5%/5min -> 'driving'
-
-        Power flow capability:
-        - 'unplugged' -> 'none'
-        - 'discharging' -> 'bidirectional' (marks this EV as last bidirectional user)
-        - plugged AND no recent discharge -> 'charge_only'
-        - plugged AND recent discharge (within sticky window) from THIS ev -> 'bidirectional'
-        - plugged AND recent discharge from ANOTHER ev -> 'charge_only' (other EV has the bidirectional charger)
-
-        Returns (connection_state, power_flow_capability).
-        """
-        now_utc = now
-
-        # Retrieve previous SOC for delta calculation
-        soc_delta_pct: float | None = None
-        if asset_id in self._ev_prev_soc:
-            prev_soc, prev_ts = self._ev_prev_soc[asset_id]
-            elapsed_minutes = (now_utc - prev_ts).total_seconds() / 60.0
-            if elapsed_minutes > 0:
-                soc_delta_pct = current_soc - prev_soc  # positive = rising
-
-        # Rule 1: shadow absent -> check for driving vs unplugged
-        if shadow is None:
-            if soc_delta_pct is not None and soc_delta_pct < -_SOC_DELTA_DRIVING_MIN:
-                # SOC dropping rapidly without a shadow price: likely driving
-                return "driving", "none"
-            return "unplugged", "none"
-
-        # Shadow is present: EV is plugged
-        # Rule 2: charging (setpoint > 0 or SOC rising fast)
-        if setpoint_kw is not None and setpoint_kw > 0.1:
-            return "charging", self._get_power_flow_capability(asset_id, "charging")
-
-        if soc_delta_pct is not None and soc_delta_pct > _SOC_DELTA_CHARGE_MIN:
-            return "charging", self._get_power_flow_capability(asset_id, "charging")
-
-        # Rule 3: discharging (setpoint < 0 or SOC falling fast)
-        if setpoint_kw is not None and setpoint_kw < -0.1:
-            self._record_discharge(asset_id, now_utc)
-            return "discharging", "bidirectional"
-
-        if soc_delta_pct is not None and soc_delta_pct < -_SOC_DELTA_DISCHARGE_MIN:
-            self._record_discharge(asset_id, now_utc)
-            return "discharging", "bidirectional"
-
-        # Rule 4: plugged idle
-        return "plugged_idle", self._get_power_flow_capability(asset_id, "plugged_idle")
-
-    def _record_discharge(self, asset_id: str, now: datetime) -> None:
-        """Record that this EV was observed discharging (bidirectional charger)."""
-        self._last_discharge_time[asset_id] = now
-        self._last_bidirectional_ev_id = asset_id
-
-    def _get_power_flow_capability(self, asset_id: str, connection_state: str) -> str:
-        """Determine power_flow_capability based on sticky bidirectional tracking."""
-        if connection_state == "charging":
-            # If this EV was recently discharging, it has the bidirectional charger
-            last_discharge = self._last_discharge_time.get(asset_id)
-            if last_discharge is not None:
-                hours_since = (datetime.now(UTC) - last_discharge).total_seconds() / 3600
-                if hours_since <= _BIDIRECTIONAL_STICKY_HOURS:
-                    return "bidirectional"
-            # Conservative default until first discharge observed
-            return "charge_only"
-
-        if connection_state == "plugged_idle":
-            # Same logic as charging
-            last_discharge = self._last_discharge_time.get(asset_id)
-            if last_discharge is not None:
-                hours_since = (datetime.now(UTC) - last_discharge).total_seconds() / 3600
-                if hours_since <= _BIDIRECTIONAL_STICKY_HOURS:
-                    return "bidirectional"
-            return "charge_only"
-
-        return "charge_only"
-
-    def _build_asset_record(
-        self,
-        asset_id: str,
-        asset_spec: dict,
-        now: datetime,
-    ) -> dict[str, Any]:
-        """Build a single asset record for one interval.
-
-        Reads entity states, infers EV connection state, and updates SOC history.
-        """
-        kind: str = asset_spec["kind"]
-        bidirectional_capable: bool = asset_spec["bidirectional_capable"]
-        soc_entity: str | None = asset_spec.get("soc_entity")
-        setpoint_entity: str | None = asset_spec.get("setpoint_entity")
-        shadow_entity: str | None = asset_spec.get("shadow_entity")
-
-        # Capacity: config override takes precedence over spec default
-        capacity_kwh: float = self._asset_capacity.get(
-            asset_id, asset_spec.get("capacity_kwh", 0.0)
-        )
-
-        # Read entities
-        soc_pct = _read_state_float(self.hass, soc_entity, fallback=0.0) or 0.0
-        setpoint_kw = _read_state_float_or_none(self.hass, setpoint_entity)
-        shadow = _read_state_float_or_none(self.hass, shadow_entity)
-        sp = setpoint_kw if setpoint_kw is not None else 0.0
-
-        # Derive per-asset flex headroom.
-        # - Battery: clipped to hybrid inverter rating (PV + battery share AC side).
-        # - EV: gated by DCEV charger allocation (one charger, two EVs) and
-        #   connection_state. Must compute connection_state first.
-        connection_state: str | None = None
-        power_flow_capability: str | None = None
-
-        if kind == "stationary_battery":
-            available_up, available_down = self._battery_asset_flex(sp)
-        elif kind == "ev":
-            connection_state, power_flow_capability = self._infer_ev_connection_state(
-                asset_id, shadow, setpoint_kw, soc_pct, now
-            )
-            available_up, available_down = self._ev_asset_flex(
-                asset_id, sp, connection_state, power_flow_capability
-            )
-        else:
-            # Unknown asset kind: fall back to spec-declared limits, no clip.
-            max_charge = asset_spec.get("max_charge_kw", DEFAULT_EV_MAX_CHARGE_KW)
-            max_discharge = asset_spec.get("max_discharge_kw", DEFAULT_EV_MAX_DISCHARGE_KW)
-            available_up = max(0.0, max_charge - max(0.0, sp))
-            available_down = max(0.0, max_discharge - max(0.0, -sp))
-
-        record: dict[str, Any] = {
-            "asset_id": asset_id,
-            "kind": kind,
-            "bidirectional_capable": bidirectional_capable,
-            "capacity_kwh": capacity_kwh,
-            "soc_pct": soc_pct,
-            "setpoint_kw": setpoint_kw,
-            "available_up_kw": round(available_up, 3),
-            "available_down_kw": round(available_down, 3),
-            "shadow_power_balance_price": shadow,
-        }
-
-        # EV-specific fields
-        if kind == "ev":
-            record["connection_state"] = connection_state
-            record["power_flow_capability"] = power_flow_capability
-            record["departure_target_pct"] = None
-            record["departure_time_utc"] = None
-
-        # Update SOC history for next interval's delta calculation
-        if kind == "ev":
-            self._ev_prev_soc[asset_id] = (soc_pct, now)
-
-        return record
-
-    def _build_record(self) -> dict[str, Any]:
-        """Read all HAEO entity states and build a schema v2.0 telemetry record.
-
-        Prices are stored in $/kWh (no /1000 conversion).
-        Runs in the main HA event loop (state reads are non-blocking).
-        """
-        now_utc = datetime.now(tz=UTC)
-        minutes = (now_utc.minute // 5) * 5
-        interval_start = now_utc.replace(minute=minutes, second=0, microsecond=0)
-
-        # Core measurements
-        net_import_kw: float = _read_state_float(
-            self.hass, self._config.get(CONF_ENTITY_NET_IMPORT), fallback=0.0
-        ) or 0.0
-
-        solar_kw: float = max(
-            0.0,
-            _read_state_float(
-                self.hass, self._config.get(CONF_ENTITY_SOLAR), fallback=0.0
-            ) or 0.0,
-        )
-
-        total_load_kw: float = _read_state_float(
-            self.hass, self._config.get(CONF_ENTITY_TOTAL_LOAD), fallback=0.0
-        ) or 0.0
-
-        # house_load_kw = total_load - sum(deferrable current_kw), clamped to 0
-        # deferrable_loads is empty in v0.3, so house_load_kw = total_load (clamped)
-        deferrable_load_kw: float = 0.0
-        house_load_kw: float = max(0.0, total_load_kw - deferrable_load_kw)
-
-        # Prices in $/kWh (no conversion)
-        price_signal_seen: float = _read_state_float(
-            self.hass, self._config.get(CONF_ENTITY_PRICE_SIGNAL), fallback=0.0
-        ) or 0.0
-        price_export_seen: float = _read_state_float(
-            self.hass, self._config.get(CONF_ENTITY_PRICE_EXPORT), fallback=0.0
-        ) or 0.0
-
-        # Envelope limits
-        envelope_import_limit_kw: float = _read_state_float(
-            self.hass, self._config.get(CONF_ENTITY_ENVELOPE_IMPORT), fallback=5.0
-        ) or 5.0
-        envelope_export_limit_kw: float = abs(
-            _read_state_float(
-                self.hass, self._config.get(CONF_ENTITY_ENVELOPE_EXPORT), fallback=5.0
-            ) or 5.0
-        )
-
-        # Shadow prices (all nullable, all in $/kWh).
-        #
-        # shadow_energy_price is the headline switchboard power-balance dual,
-        # i.e. the marginal cost of one extra kWh of net energy at the meter.
-        # The four constraint-specific shadows are non-zero only when that
-        # particular constraint is binding for the current interval.
-        shadow_energy_price = _read_state_float_or_none(
-            self.hass, self._config.get(CONF_ENTITY_SHADOW_ENERGY)
-        )
-        if shadow_energy_price is not None:
-            shadow_energy_price = round(shadow_energy_price, 6)
-
-        shadow_load_forecast = _read_state_float_or_none(
-            self.hass, self._config.get(CONF_ENTITY_SHADOW_LOAD_FORECAST)
-        )
-        shadow_solar_forecast = _read_state_float_or_none(
-            self.hass, self._config.get(CONF_ENTITY_SHADOW_SOLAR_FORECAST)
-        )
-        shadow_envelope_import = _read_state_float_or_none(
-            self.hass, self._config.get(CONF_ENTITY_SHADOW_ENVELOPE_IMPORT)
-        )
-        shadow_envelope_export = _read_state_float_or_none(
-            self.hass, self._config.get(CONF_ENTITY_SHADOW_ENVELOPE_EXPORT)
-        )
-
-        # Naive baseline: use total_load_kw (subtraction method)
-        # If HAEO exposes a counterfactual sensor, it would go here in a future version
-        naive_baseline_kw = total_load_kw
-        naive_baseline_method = "subtraction"
-
-        # Build asset records first: per-asset flex computation depends on
-        # connection_state inference and DCEV sticky allocation.
-        assets: list[dict[str, Any]] = []
-        for asset_id, asset_spec in ASSET_DEFAULTS.items():
-            try:
-                asset_record = self._build_asset_record(asset_id, asset_spec, now_utc)
-                assets.append(asset_record)
-            except Exception as exc:  # pylint: disable=broad-except
-                _LOGGER.warning(
-                    "Failed to build asset record for %s: %s", asset_id, exc
-                )
-
-        # Household flex aggregation (schema v2.0).
-        #
-        # The household has three sequential bottlenecks on flex:
-        #   1. asset_sum         - what the assets can physically deliver/absorb
-        #   2. hybrid inverter   - AC-side ceiling (battery, PV, DCEV all share it)
-        #   3. grid envelope     - DNSP-imposed import/export cap (CSIP-AUS or static)
-        # Cohort flex is the minimum of the three.
-        #
-        # If HAEO exposes a household flex sensor directly, that takes precedence
-        # (it presumably already accounts for these constraints inside HAEO's LP).
-        flex_up_entity = self._config.get(CONF_ENTITY_FLEX_UP)
-        flex_down_entity = self._config.get(CONF_ENTITY_FLEX_DOWN)
-
-        inverter_ac_to_dc = self._read_inverter_ac_to_dc()
-        inverter_dc_to_ac = self._read_inverter_dc_to_ac()
-
-        if flex_up_entity and self.hass.states.get(flex_up_entity) is not None:
-            flex_up = max(
-                0.0,
-                _read_state_float(self.hass, flex_up_entity, fallback=0.0) or 0.0,
-            )
-        else:
-            asset_flex_up_sum = sum(
-                a.get("available_up_kw", 0.0) or 0.0 for a in assets
-            )
-            flex_up = min(
-                asset_flex_up_sum,
-                inverter_ac_to_dc,
-                envelope_import_limit_kw,
-            )
-
-        if flex_down_entity and self.hass.states.get(flex_down_entity) is not None:
-            flex_down = max(
-                0.0,
-                _read_state_float(self.hass, flex_down_entity, fallback=0.0) or 0.0,
-            )
-        else:
-            asset_flex_down_sum = sum(
-                a.get("available_down_kw", 0.0) or 0.0 for a in assets
-            )
-            flex_down = min(
-                asset_flex_down_sum,
-                inverter_dc_to_ac,
-                envelope_export_limit_kw,
-            )
-
-        record: dict[str, Any] = {
-            "schema_version": SCHEMA_VERSION,
-            "interval_start_utc": interval_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "region": self.region,
-            "postcode_prefix": self._postcode_prefix,
-            "net_import_kw": round(net_import_kw, 3),
-            "solar_kw": round(solar_kw, 3),
-            "house_load_kw": round(house_load_kw, 3),
-            "deferrable_load_kw": round(deferrable_load_kw, 3),
-            "naive_baseline_kw": round(naive_baseline_kw, 3),
-            "naive_baseline_method": naive_baseline_method,
-            "price_signal_seen": round(price_signal_seen, 6),
-            "price_export_seen": round(price_export_seen, 6),
-            "envelope_import_limit_kw": round(envelope_import_limit_kw, 3),
-            "envelope_export_limit_kw": round(envelope_export_limit_kw, 3),
-            "flex_available_up_kw": round(flex_up, 3),
-            "flex_available_down_kw": round(flex_down, 3),
-            "shadow_energy_price": shadow_energy_price,
-            "shadow_load_forecast_price": shadow_load_forecast,
-            "shadow_solar_forecast_price": shadow_solar_forecast,
-            "shadow_envelope_import_price": shadow_envelope_import,
-            "shadow_envelope_export_price": shadow_envelope_export,
-            "assets": assets,
-            "deferrable_loads": [],
-        }
-        return record
 
     async def _async_run_global_sweep(self) -> None:
         """Run the global entity sweep and log unmapped entities."""
@@ -890,7 +355,10 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
             _LOGGER.info("Required inputs available again; resuming telemetry")
             self._missing_warned = frozenset()
 
-        record = self._build_record()
+        now_utc = datetime.now(tz=UTC)
+        record = self._build_record(now_utc)
+        self._sample_offset_s = (now_utc - interval_start_for(now_utc)).total_seconds()
+        self._inputs_ready.set()
 
         # Validate using voluptuous (synchronous; run in executor)
         try:
@@ -998,6 +466,9 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._data.last_push_time = dt_util.parse_datetime(stats["last_push_time"])
         if stats.get("cohort_checked"):
             self._cohort_checked = dt_util.parse_datetime(stats["cohort_checked"])
+        if stats.get("sample_offset_s") is not None:
+            self._sample_offset_s = float(stats["sample_offset_s"])
+        self._backfill_version = stored.get("backfill_version")
         self._roll_push_day()
         self._sync_data()
 
@@ -1023,7 +494,9 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 "cohort_checked": (
                     self._cohort_checked.isoformat() if self._cohort_checked else None
                 ),
+                "sample_offset_s": self._sample_offset_s,
             },
+            "backfill_version": self._backfill_version,
         }
         try:
             await self._store.async_save(payload)
@@ -1132,6 +605,7 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if self._data.source_status:
             _LOGGER.info("Nimbus source: records available again")
         self._data.source_status = None
+        self._inputs_ready.set()
         self._buffer.append(validated)
         _LOGGER.debug("Buffered Nimbus record %s (buffer size: %d)", interval, len(self._buffer))
         if len(self._buffer) >= RECORDS_PER_PUSH:
@@ -1143,6 +617,309 @@ class NemFlexTelemetryCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """5-minute backstop for the Nimbus source, then the usual push."""
         await self._async_ingest_nimbus()
         return await self._async_after_buffer()
+
+    # ------------------------------------------------------------------
+    # History rebuild: recover missed intervals from the recorder
+    # ------------------------------------------------------------------
+
+    @callback
+    def async_schedule_backfill(self) -> None:
+        """Run the automatic backfill once per integration VERSION.
+
+        Runs in the background so setup is not delayed. The marker is saved
+        only when the backfill completed, so a failed GitHub read or push is
+        retried on the next start.
+        """
+        if self._backfill_version == VERSION:
+            return
+        self.config_entry.async_create_background_task(
+            self.hass,
+            self._async_backfill_when_ready(),
+            f"{DOMAIN} backfill {self.household_id}",
+        )
+
+    async def _async_backfill_when_ready(self) -> None:
+        """Wait for Home Assistant and the inputs, then backfill."""
+        started = asyncio.Event()
+
+        @callback
+        def _on_started(_hass: HomeAssistant) -> None:
+            started.set()
+
+        unsub = async_at_started(self.hass, _on_started)
+        try:
+            await started.wait()
+        finally:
+            unsub()
+        # Same readiness signal as the live builder (#21): wait for one
+        # interval built from ready inputs, but not forever, since the
+        # rebuild itself reads history, not live states.
+        try:
+            async with asyncio.timeout(BACKFILL_READY_TIMEOUT_SECONDS):
+                await self._inputs_ready.wait()
+        except TimeoutError:
+            _LOGGER.debug("Backfill: inputs not ready after %ss; running anyway",
+                          BACKFILL_READY_TIMEOUT_SECONDS)
+
+        try:
+            summary = await self._async_rebuild_locked(None, None, dry_run=False)
+        except Exception:  # pylint: disable=broad-except
+            # A recorder or parsing failure must not surface as an unhandled
+            # task error; the marker stays unset so the next start retries.
+            _LOGGER.exception("Automatic backfill failed; will retry on next start")
+            return
+        if summary.complete:
+            self._backfill_version = VERSION
+            await self._async_save_state()
+
+    async def async_rebuild_intervals(
+        self,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Rebuild unpublished intervals in a window from recorder history.
+
+        ``start`` and ``end`` default to the backfill window. Returns the
+        summary the ``rebuild_intervals`` service responds with.
+        """
+        summary = await self._async_rebuild_locked(start, end, dry_run=dry_run)
+        return summary.as_dict()
+
+    async def _async_rebuild_locked(
+        self, start: datetime | None, end: datetime | None, *, dry_run: bool
+    ) -> RebuildSummary:
+        """Serialise rebuilds (service call and automatic backfill)."""
+        async with self._rebuild_lock:
+            summary = RebuildSummary(self.household_id, self.source, dry_run)
+            try:
+                await self._async_rebuild(summary, start, end)
+            except TokenInvalidError as exc:
+                summary.error = str(exc)
+                _LOGGER.warning("Rebuild: token invalid: %s. Triggering reauth.", exc)
+                self.config_entry.async_start_reauth(self.hass)
+            except GitHubPushError as exc:
+                summary.error = str(exc)
+            if summary.error:
+                summary.complete = False
+            _LOGGER.info(
+                "Rebuild%s for household %s, %s to %s: %d checked, %d already "
+                "published, %d rebuilt, %d pushed, %d skipped %s%s",
+                " (dry run)" if dry_run else "",
+                self.household_id,
+                summary.window_start,
+                summary.window_end,
+                summary.intervals_checked,
+                summary.already_present,
+                len(summary.rebuilt_intervals),
+                summary.pushed,
+                sum(summary.skipped_reasons.values()),
+                summary.skipped_reasons or "",
+                f"; error: {summary.error}" if summary.error else "",
+            )
+            return summary
+
+    def _rebuild_not_before(self) -> list[datetime | None]:
+        """Never rebuild before this entry existed or consent was given."""
+        times: list[datetime | None] = [getattr(self.config_entry, "created_at", None)]
+        consent = self._config.get(CONF_CONSENT_TIMESTAMP)
+        if consent:
+            times.append(dt_util.parse_datetime(consent))
+        return times
+
+    async def _async_rebuild(
+        self,
+        summary: RebuildSummary,
+        start: datetime | None,
+        end: datetime | None,
+    ) -> None:
+        """Find the unpublished intervals in the window and rebuild them."""
+        if "recorder" not in self.hass.config.components:
+            summary.error = "the recorder integration is not loaded"
+            return
+        client = self._get_or_create_github_client()
+        not_before = self._rebuild_not_before()
+
+        # The default window never starts before the household's first
+        # published record: before that it was not yet contributing.
+        first_day = None
+        if start is None:
+            first_day = await client.first_published_date(self.household_id)
+            if first_day is None:
+                summary.complete = True
+                _LOGGER.info("Rebuild: household %s has not published yet", self.household_id)
+                return
+            not_before.append(datetime.combine(first_day, datetime.min.time(), UTC))
+
+        window_start, window_end = backfill_window(
+            dt_util.utcnow(),
+            max_days=BACKFILL_MAX_DAYS,
+            keep_days=recorder_keep_days(self.hass),
+            not_before=not_before,
+            start=dt_util.as_utc(start) if start else None,
+            end=dt_util.as_utc(end) if end else None,
+        )
+        summary.window_start = format_interval(window_start)
+        summary.window_end = format_interval(window_end)
+        intervals = interval_starts(window_start, window_end)
+        if not intervals:
+            summary.complete = True
+            return
+
+        published_by_day = await client.read_published_intervals(
+            self.household_id, {t.date() for t in intervals}
+        )
+        if first_day is not None and published_by_day.get(first_day):
+            first_record = min(published_by_day[first_day])
+            intervals = [t for t in intervals if format_interval(t) >= first_record]
+        summary.intervals_checked = len(intervals)
+
+        buffered = {r.get("interval_start_utc") for r in self._buffer}
+        candidates: list[datetime] = []
+        for t in intervals:
+            key = format_interval(t)
+            published = published_by_day.get(t.date())
+            if key in buffered or (published is not None and key in published):
+                summary.already_present += 1
+            elif published is None:
+                summary.skip(key, REASON_DAY_UNREADABLE)
+            else:
+                candidates.append(t)
+
+        if candidates:
+            if self.source == SOURCE_NIMBUS:
+                records = await self._async_rebuild_nimbus(summary, candidates)
+            else:
+                records = await self._async_rebuild_haeo(summary, candidates)
+            await self._async_push_rebuilt(summary, records)
+
+        summary.complete = (
+            summary.error is None
+            and REASON_DAY_UNREADABLE not in summary.skipped_reasons
+        )
+
+    def _validate_rebuilt(
+        self, summary: RebuildSummary, records: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Run rebuilt records through the live validation (executor job)."""
+        valid: list[dict[str, Any]] = []
+        for record in records:
+            try:
+                valid.append(self._validate_record(record))
+            except vol.Invalid as exc:
+                field = ".".join(str(p) for p in exc.path) or "record"
+                summary.skip(
+                    record.get("interval_start_utc", "?"), f"failed validation: {field}"
+                )
+        return valid
+
+    async def _async_rebuild_haeo(
+        self, summary: RebuildSummary, candidates: list[datetime]
+    ) -> list[dict[str, Any]]:
+        """Rebuild HAEO-source records by replaying recorder history."""
+        wanted = set(candidates)
+        offset = timedelta(
+            seconds=self._sample_offset_s
+            if self._sample_offset_s is not None
+            else DEFAULT_SAMPLE_OFFSET_S
+        )
+        required = [self._config.get(f) for f in REQUIRED_ENTITY_FIELDS]
+        records: list[dict[str, Any]] = []
+        for replay_start, last in replay_runs(candidates):
+            # Fresh inference state per run, replayed in time order.
+            builder = HistoricalRecordBuilder(dict(self._config))
+            entity_ids = builder.entities_read()
+            for chunk_start, chunk_end in chunks(replay_start, last + INTERVAL):
+                history = await async_fetch_history(
+                    self.hass, entity_ids, chunk_start, chunk_end
+                )
+                builder.timeline = HistoryTimeline(history)
+                for t in interval_starts(chunk_start, chunk_end):
+                    builder.when = t + offset
+                    key = format_interval(t)
+                    # Same rule as live: no record from unavailable inputs.
+                    if missing := builder._missing_required_inputs():
+                        if t in wanted:
+                            summary.skip(
+                                key,
+                                REASON_NO_HISTORY
+                                if builder.no_history_for(required)
+                                else "required input(s) unavailable: " + ", ".join(missing),
+                            )
+                        continue
+                    record = builder._build_record(builder.when)
+                    if t in wanted:
+                        records.append(record)
+                    # Otherwise replayed only to carry EV state forward.
+        return await self.hass.async_add_executor_job(
+            self._validate_rebuilt, summary, records
+        )
+
+    async def _async_rebuild_nimbus(
+        self, summary: RebuildSummary, candidates: list[datetime]
+    ) -> list[dict[str, Any]]:
+        """Recover Nimbus records from the attribute history of its sensor."""
+        wanted = {format_interval(t) for t in candidates}
+        found: dict[str, dict[str, Any]] = {}
+        search_end = min(candidates[-1] + INTERVAL + NIMBUS_PUBLISH_LAG, dt_util.utcnow())
+        for chunk_start, chunk_end in chunks(candidates[0], search_end):
+            if not any(
+                chunk_start - INTERVAL - NIMBUS_PUBLISH_LAG <= t < chunk_end
+                for t in candidates
+            ):
+                continue
+            history = await async_fetch_history(
+                self.hass, [NIMBUS_TELEMETRY_ENTITY], chunk_start, chunk_end, attributes=True
+            )
+            for state in history.get(NIMBUS_TELEMETRY_ENTITY, []):
+                result = read_nimbus_record(
+                    state, region=self.region, postcode_prefix=self._postcode_prefix
+                )
+                if result.record is None:
+                    continue
+                key = result.record["interval_start_utc"]
+                if key in wanted and key not in found:
+                    found[key] = result.record
+        for key in sorted(wanted - found.keys()):
+            summary.skip(key, REASON_NO_NIMBUS_RECORD)
+        return await self.hass.async_add_executor_job(
+            self._validate_rebuilt, summary, [found[k] for k in sorted(found)]
+        )
+
+    async def _async_push_rebuilt(
+        self, summary: RebuildSummary, records: list[dict[str, Any]]
+    ) -> None:
+        """Push rebuilt records straight to GitHub (not via the buffer).
+
+        A backfill can exceed the 288-record buffer. The client's dedupe on
+        append still drops any interval that reached GitHub meanwhile.
+        """
+        records.sort(key=lambda r: r["interval_start_utc"])
+        summary.rebuilt_intervals = [r["interval_start_utc"] for r in records]
+        if summary.dry_run or not records:
+            return
+        try:
+            await self._get_or_create_github_client().append_records(
+                self.household_id,
+                records,
+                commit_message=(
+                    f"telemetry: {self.household_id} rebuilt {len(records)} "
+                    "interval(s) from history"
+                ),
+            )
+        except GitHubPushError as exc:
+            # Includes PushPermissionError. Nothing is buffered: the next
+            # rebuild finds the same gaps and tries again.
+            self._push_error_count += 1
+            summary.error = f"push of rebuilt records failed: {exc}"
+            self._sync_data()
+            return
+        summary.pushed = len(records)
+        self._records_pushed_today += len(records)
+        self._data.last_push_time = datetime.now(tz=UTC)
+        self._sync_data()
+        await self._async_save_state()
+        self.async_update_listeners()
 
     def _validate_record(self, record: dict[str, Any]) -> dict[str, Any]:
         """Run lightweight voluptuous validation on the top-level record.
