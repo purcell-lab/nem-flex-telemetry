@@ -549,6 +549,10 @@ def compute_counterfactual(df: pd.DataFrame) -> dict[str, Any]:
         effective_price_kwh = price_signal_seen if net_import_kw > 0 else price_export_seen
         saving_aud = (naive_baseline_kw - net_import_kw) * effective_price_kwh * (300 / 3600)
 
+    With the ``subtraction`` baseline (naive_baseline_kw = house load), this is
+    the value of all grid import offset by solar, battery and EV, not the
+    effect of load shifting alone. The dashboard labels it that way (#23).
+
     No /1000 scaling (prices are already in $/kWh).
     The (300/3600) factor converts kW over 5 minutes to kWh.
     """
