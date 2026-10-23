@@ -24,9 +24,17 @@ trade-off, raise an issue.
   user's own GitHub identity. That **is a real attribution leak** and
   it is described in detail below. It is acceptable while the cohort is
   small and self-selected, and unacceptable for a production cohort.
-- For the **public dashboard**, k-anonymity guardrails keep small
-  cohorts coarse-grained. We do not render any chart or table that
-  could expose an individual household's load curve.
+- The aggregator enforces a **configurable k-anonymity threshold** on
+  every per-region view and on the published parquet, and drops
+  `household_id` from the parquet. The region threshold currently
+  defaults to **k = 1 (no suppression)** because the cohort is two
+  households in two regions, so **every per-region chart on the
+  dashboard today is one household's data**. The dashboard labels those
+  series as individual data rather than hiding the fact. See
+  [k-anonymity guardrails](#k-anonymity-guardrails).
+- **Raw per-household JSONL in `data/raw/` is public** under CC-BY-4.0
+  until the v0.5 relay architecture lands. The guardrails apply to the
+  derived outputs only; they do not protect the raw records.
 - For the **production cohort (v0.5 and later)** the project moves to a
   relay architecture so that household → GitHub identity links no
   longer exist on the public record.
@@ -86,8 +94,10 @@ The realistic adversaries are, in roughly increasing order of capability:
 2. **Curious researcher correlating across public records**. Tries to
    match published load curves against publicly available demographic
    data, retailer marketing data, or social-media-disclosed solar /
-   battery installations. Mitigation: pseudonymous identifiers,
-   k-anonymity guardrails on aggregated views, no exact location.
+   battery installations. Mitigation: pseudonymous identifiers, no
+   exact location. The k-anonymity guardrails on aggregated views only
+   help once the cohort is large enough to raise the threshold, and the
+   raw JSONL is public in the meantime.
 3. **Motivated re-identification attacker with commercial smart-meter
    data**. Has access to NMI-level retailer data or AEMO MDFF data and
    wants to match it to a public NEM Flex Telemetry household.
@@ -217,50 +227,118 @@ Properties:
   given the immutability properties of git, and is documented in the
   withdrawal process.
 
-## k-anonymity guardrails for the public dashboard
+## k-anonymity guardrails
 
-The public dashboard at https://purcell-lab.github.io/nem-flex-telemetry/
-applies the following rules before rendering any chart:
+This section describes what `scripts/aggregate.py` actually enforces.
+The tests in `tests/test_k_anonymity.py` run in CI on every pull
+request that touches the aggregator and fail if any published regional
+series is built from fewer than `K_MIN_REGION` households.
 
-- **Per-postcode-prefix views require k ≥ 5 households** in that
-  prefix. Below this threshold, the prefix is suppressed from any
-  geographic chart and rolled up into the parent NEM region.
-- **No individual household curves** are rendered on the public
-  dashboard, regardless of how many households are in the cohort.
-  Single-household exploration is available only to the contributing
-  household via their local Home Assistant.
-- **Time-series aggregations** are computed at the regional or
-  cohort level (mean, p10, p50, p90, p95) rather than per-household.
-- **Asset-level breakdowns** (battery vs EV vs solar contribution)
-  are aggregated by asset kind across the cohort, not per-household.
-- **Postcode-prefix coarsening rule**: if any prefix has fewer than 5
-  contributing households, the corresponding rows are dropped from
-  the prefix-level cohort tables before publication. Only the
-  coarsened tables are committed to the repo and rendered on the
-  dashboard. The raw per-household JSONL records remain in
-  `data/raw/<household-id>/` for researchers operating under data-use
-  agreements, but are never surfaced on the public dashboard.
-- **Time alignment**: all timestamps are rounded to the 5-minute
-  interval boundary so that no behavioural inference can be drawn
-  from sub-interval timing precision.
+### Thresholds
 
-These guardrails are encoded in the aggregation pipeline
-(`scripts/aggregate.py` and `.github/workflows/aggregate.yml`) and
-are validated by CI on every pull request. A change that would
-weaken any of these guardrails requires an explicit privacy review
-in the pull request description.
+| Constant | Default | Environment override | Applies to |
+|---|---|---|---|
+| `K_MIN_REGION` | 1 | `NEM_FLEX_K_MIN_REGION` | Every per-region series and the cohort parquet |
+| `K_MIN_PREFIX` | 5 | `NEM_FLEX_K_MIN_PREFIX` | `postcode_prefix` in the cohort parquet |
+| `K_ADVISORY` | 5 | `NEM_FLEX_K_ADVISORY` | Dashboard labelling only |
+
+**Why `K_MIN_REGION` is 1 today.** The cohort is two households, one
+in NSW1 and one in QLD1. At k = 5 every per-region chart would be
+suppressed and the dashboard would show nothing regional. The project
+owner has not yet set a production threshold. Until then the default
+publishes every region and relies on clear labelling (below) so that
+nobody mistakes a single household's data for a cohort aggregate.
+Raising the threshold is a one-line change to the constant or an
+environment variable on the aggregate workflow.
+
+### Per-region views
+
+The per-region outputs are:
+
+- `price_response.json` (import and export price-response scatter, per region)
+- `buy_sell_spread.json` (hourly buy and sell prices, per region)
+- `curtailment_heatmap.json` (region x hour curtailment heatmap)
+- `shadow_prices.json`: `envelope_shadow_heatmap` and
+  `grid_envelope_shadow_heatmap` (region x hour shadow-price heatmaps)
+
+For each of these the aggregator counts distinct households per region.
+A region with fewer than `K_MIN_REGION` households is withheld from its
+own series. Its rows are pooled into a single `NEM` series ("NEM
+(pooled regions)" on the dashboard) if the pooled households reach
+`K_MIN_REGION`, and are dropped from that view otherwise. Each payload
+carries:
+
+- `households`: distinct households behind each published region series
+- `suppressed_regions`: regions withheld from their own series
+- `rolled_up_into`: `"NEM"` when suppressed rows were pooled, else `null`
+- `k_min_region`, `k_advisory` and `suppression_note`
+
+The dashboard labels any region series with fewer than `K_ADVISORY`
+households, for example "1 household — individual data", and shows
+"suppressed: fewer than k households" in place of the chart for a
+suppressed region. `status.json` carries the thresholds and the
+per-region household counts under `k_anonymity`.
+
+### Cohort-wide views
+
+The cohort flex stack, counterfactual ledger, assets and V2G views,
+the shadow-price-by-hour chart and the headline totals aggregate across
+all households and are not split by region. They are **not** subject to
+`K_MIN_REGION`. With two households, a cohort-wide series is a sum or
+mean over two homes, so it is close to individual data. The dashboard
+header notes when the cohort is smaller than `K_ADVISORY`.
+
+Once regions are suppressed without being pooled, a cohort-wide total
+minus the published regions can reveal the suppressed households'
+contribution. The aggregator does not defend against that differencing.
+
+### Cohort parquet (`data/cohort/`)
+
+- `household_id` is **never** written to the published parquet.
+  Per-household grouping (resampling, the asset snapshot and the cohort
+  size) happens in memory only.
+- Rows in regions below `K_MIN_REGION` are pooled into `NEM` or dropped,
+  using the same rule as the per-region views.
+- `postcode_prefix` is blanked (null) for any prefix shared by fewer
+  than `K_MIN_PREFIX` households. With the current cohort, every prefix
+  is blanked.
+- Each run rebuilds the parquet tree from scratch, so a suppressed or
+  withdrawn date leaves no stale file behind.
+
+The 5-minute and hourly parquet rows are still one household per row
+(without the identifier). With one household per region, region and
+timestamp are enough to separate households. Removing `household_id`
+stops casual linking to the raw tree. It does not make the parquet
+anonymous.
+
+### What is not enforced
+
+- **The raw JSONL is public.** `data/raw/<household-id>/` is committed
+  to this public repository and licensed CC-BY-4.0 along with the rest
+  of `data/`. It carries the household identifier, postcode prefix and
+  full 5-minute telemetry for every household. None of the guardrails
+  above apply to it. This stays true until the v0.5 relay architecture
+  lands and the raw tier moves behind a researcher-access agreement.
+- No other dashboard view is grouped by `postcode_prefix`. Since v0.6.0
+  the dashboard aggregates by region only.
+- Timestamps are the 5-minute interval starts the integration
+  publishes. The aggregator does not coarsen them further.
+
+A change that weakens any of these guardrails, including lowering a
+threshold once it has been raised, should call that out for privacy
+review in the pull request description.
 
 ## Data access tiers
 
 Three tiers are defined:
 
-1. **Public (everyone)**. Aggregated cohort views on the dashboard
-   subject to the k-anonymity guardrails above. Aggregated parquet
-   files at `data/cohort/`.
+1. **Public (everyone)**. Dashboard views and the cohort parquet at
+   `data/cohort/`, subject to the k-anonymity guardrails above.
 2. **Researcher (data-use agreement)**. Per-household raw JSONL at
-   `data/raw/<household-id>/`. Currently public during the development
-   phase; will move behind a researcher-access agreement at v0.5 if
-   the cohort grows beyond an opt-in friend group.
+   `data/raw/<household-id>/`. **Currently public** in this repository
+   under CC-BY-4.0. It will move behind a researcher-access agreement
+   when the v0.5 relay architecture lands, if the cohort grows beyond
+   an opt-in friend group. Until then, treat this tier as public.
 3. **Contributing household (themselves only)**. Their own data via
    their local Home Assistant, with no privacy considerations beyond
    their own choices.
@@ -291,6 +369,13 @@ the same urgency as security issues.
 
 ## Changelog
 
+- **2026-10-09**: k-anonymity guardrails implemented in the aggregator
+  (#22). The earlier text described a k ≥ 5 rule and a "no individual
+  household curves" guarantee that the pipeline did not implement. This
+  version documents the configurable thresholds, the current default
+  of `K_MIN_REGION = 1` and why, the removal of `household_id` from the
+  cohort parquet, and the fact that raw JSONL is public under CC-BY-4.0
+  until the relay architecture lands.
 - **2026-05-05**: Initial PRIVACY.md, written alongside the v0.4 prep
   changes that move household_id to a UUID v4 default with relaxed
   validation. Documents the Option 1 attribution leak explicitly,
