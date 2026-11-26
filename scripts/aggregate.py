@@ -23,6 +23,11 @@ Counterfactual formula (schema v2.0, $/kWh throughout):
 
 All prices are in $/kWh. No /1000 scaling is applied.
 
+k-anonymity (#22): per-region views pass through apply_region_guardrail
+(K_MIN_REGION, env NEM_FLEX_K_MIN_REGION) and carry a `households` count per
+region; published parquet drops household_id and blanks postcode_prefix below
+K_MIN_PREFIX households (env NEM_FLEX_K_MIN_PREFIX). See docs/PRIVACY.md.
+
 Usage (from repo root):
     python scripts/aggregate.py
 
@@ -72,6 +77,49 @@ INTERVAL_SECONDS = 300
 # |shadow_energy_price| above this ($/kWh) is counted as a constraint-bound
 # interval: beyond the market-price window, so a penalty-driven dual (#30).
 SHADOW_BOUND_THRESHOLD = 2.0
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read a positive int override from the environment, else ``default``."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        _LOG.warning("Ignoring %s=%r: not an integer, using %d", name, raw, default)
+        return default
+    if value < 1:
+        _LOG.warning("Ignoring %s=%r: must be >= 1, using %d", name, raw, default)
+        return default
+    return value
+
+
+# k-anonymity guardrails (#22). See docs/PRIVACY.md.
+#
+# K_MIN_REGION: a per-region series is published only if at least this many
+#   distinct households contribute to it. Regions below the threshold are pooled
+#   into a single NEM_ROLLUP_REGION series when the pool itself reaches the
+#   threshold, and otherwise suppressed. Defaults to 1 (no suppression) while the
+#   cohort is tiny: at k=5 every per-region chart would be suppressed. Every
+#   per-region payload carries a `households` count so the dashboard can label
+#   small-n series as individual data.
+# K_MIN_PREFIX: rows grouped by postcode_prefix keep the prefix only if at
+#   least this many households share it; otherwise the prefix is blanked.
+# K_ADVISORY: the dashboard flags any published series with fewer households
+#   than this as individual or near-individual data.
+#
+# Override in CI or locally via NEM_FLEX_K_MIN_REGION / NEM_FLEX_K_MIN_PREFIX /
+# NEM_FLEX_K_ADVISORY.
+K_MIN_REGION = _env_int("NEM_FLEX_K_MIN_REGION", 1)
+K_MIN_PREFIX = _env_int("NEM_FLEX_K_MIN_PREFIX", 5)
+K_ADVISORY = _env_int("NEM_FLEX_K_ADVISORY", 5)
+
+# Pseudo-region holding households from regions below K_MIN_REGION.
+NEM_ROLLUP_REGION = "NEM"
+REGION_ORDER = NEM_REGIONS + [NEM_ROLLUP_REGION]
+
+SUPPRESSION_NOTE = "suppressed: fewer than k households"
 
 # Publisher household-ID aliasing.
 #
@@ -284,14 +332,107 @@ def expand_assets(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# k-anonymity guardrails (#22)
+# ---------------------------------------------------------------------------
+
+def apply_region_guardrail(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Enforce K_MIN_REGION on a frame that is about to be grouped by region.
+
+    Regions with fewer than K_MIN_REGION distinct households are taken out of
+    their own series. Their rows are relabelled to NEM_ROLLUP_REGION if the
+    pooled set reaches K_MIN_REGION households, and dropped otherwise, so no
+    published region series is built from fewer than K_MIN_REGION households.
+
+    Returns the guarded frame and the privacy fields to merge into the payload:
+      households:          {region: distinct households} for published series
+      suppressed_regions:  regions withheld from their own series
+      rolled_up_into:      NEM_ROLLUP_REGION if suppressed rows were pooled, else None
+      k_min_region / k_advisory / suppression_note: thresholds for the dashboard
+
+    Frames without a household_id column (unit-test fixtures) pass through with
+    empty counts.
+    """
+    privacy: dict[str, Any] = {
+        "households": {},
+        "suppressed_regions": [],
+        "rolled_up_into": None,
+        "k_min_region": K_MIN_REGION,
+        "k_advisory": K_ADVISORY,
+        "suppression_note": SUPPRESSION_NOTE,
+    }
+    if df.empty or "household_id" not in df.columns or "region" not in df.columns:
+        return df, privacy
+
+    counts = df.groupby("region")["household_id"].nunique()
+    below = [r for r in counts.index if counts[r] < K_MIN_REGION]
+    if below:
+        mask = df["region"].isin(below)
+        pooled = df.loc[mask, "household_id"].nunique()
+        if pooled >= K_MIN_REGION:
+            df = df.copy()
+            df.loc[mask, "region"] = NEM_ROLLUP_REGION
+            privacy["rolled_up_into"] = NEM_ROLLUP_REGION
+        else:
+            df = df.loc[~mask]
+        privacy["suppressed_regions"] = sorted(
+            below, key=lambda r: REGION_ORDER.index(r) if r in REGION_ORDER else len(REGION_ORDER)
+        )
+        _LOG.debug(
+            "k-anonymity: suppressed regions %s (k_min_region=%d), rolled up into %s",
+            privacy["suppressed_regions"], K_MIN_REGION, privacy["rolled_up_into"],
+        )
+
+    published = df.groupby("region")["household_id"].nunique()
+    privacy["households"] = {
+        r: int(published[r]) for r in REGION_ORDER if r in published.index
+    }
+    return df, privacy
+
+
+def mask_small_prefixes(df: pd.DataFrame, prefix_counts: pd.Series) -> pd.DataFrame:
+    """Blank postcode_prefix where fewer than K_MIN_PREFIX households share it.
+
+    ``prefix_counts`` maps prefix -> distinct households, computed before any
+    per-household rows are collapsed.
+    """
+    if df.empty or "postcode_prefix" not in df.columns:
+        return df
+    df = df.copy()
+    prefix = df["postcode_prefix"].astype("string")
+    keep = prefix.map(prefix_counts).fillna(0) >= K_MIN_PREFIX
+    df["postcode_prefix"] = prefix.where(keep)
+    return df
+
+
+# ---------------------------------------------------------------------------
 # Cohort parquet outputs
 # ---------------------------------------------------------------------------
 
 def write_parquet_by_date(df: pd.DataFrame, resolution: str) -> None:
-    """Write cohort parquet files partitioned by date."""
+    """Write cohort parquet files partitioned by date.
+
+    Published parquet never carries household_id (#22). Rows still describe one
+    household each at 5-minute resolution, so the region guardrail applies, and
+    postcode_prefix is blanked below K_MIN_PREFIX households.
+    """
     if df.empty:
         _LOG.info("No data for %s parquet output.", resolution)
         return
+
+    # Every run rebuilds the full history from data/raw/, so clear the previous
+    # output first: a date that is now suppressed (or withdrawn) must not leave
+    # a stale file, possibly from before household_id was dropped, behind.
+    out_root = DATA_COHORT / resolution
+    stale = list(out_root.rglob("*.parquet")) if out_root.exists() else []
+    for path in stale:
+        path.unlink()
+
+    df, _ = apply_region_guardrail(df)
+    if df.empty:
+        _LOG.info("No publishable data for %s parquet output after k-anonymity.", resolution)
+        return
+    prefix_counts = df.groupby("postcode_prefix")["household_id"].nunique()
+    prefix_counts.index = prefix_counts.index.astype(str)
 
     # Columns safe to resample numerically (exclude arrays and strings)
     numeric_cols = [
@@ -314,6 +455,7 @@ def write_parquet_by_date(df: pd.DataFrame, resolution: str) -> None:
             .reset_index()
         )
 
+    resampled = mask_small_prefixes(resampled, prefix_counts).drop(columns=["household_id"])
     resampled["_date"] = resampled["interval_start_utc"].dt.date
     for date, group in resampled.groupby("_date"):
         year = date.year
@@ -322,7 +464,17 @@ def write_parquet_by_date(df: pd.DataFrame, resolution: str) -> None:
         out_dir = DATA_COHORT / resolution / f"{year}" / f"{month:02d}"
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"{day:02d}.parquet"
-        table = pa.Table.from_pandas(group.drop(columns=["_date"]))
+        table = pa.Table.from_pandas(group.drop(columns=["_date"]), preserve_index=False)
+        # Keep postcode_prefix the same string type as region even when every
+        # value in the file was blanked by mask_small_prefixes.
+        idx = table.schema.get_field_index("postcode_prefix")
+        if idx >= 0:
+            str_type = table.schema.field("region").type
+            if not (pa.types.is_string(str_type) or pa.types.is_large_string(str_type)):
+                str_type = pa.string()
+            table = table.set_column(
+                idx, "postcode_prefix", table.column(idx).cast(str_type)
+            )
         pq.write_table(table, out_path)
 
     _LOG.info("Wrote %s parquet files for resolution=%s", resampled["_date"].nunique(), resolution)
@@ -331,6 +483,16 @@ def write_parquet_by_date(df: pd.DataFrame, resolution: str) -> None:
 # ---------------------------------------------------------------------------
 # Dashboard view computations (tabs 1-5: updated for $/kWh)
 # ---------------------------------------------------------------------------
+
+def _region_placeholder(
+    empty: dict[str, Any], region: str, privacy: dict[str, Any]
+) -> dict[str, Any]:
+    """Empty per-region block, flagged when the region was suppressed (#22)."""
+    block = {k: (dict(v) if isinstance(v, dict) else v) for k, v in empty.items()}
+    if region in privacy["suppressed_regions"]:
+        block["suppressed"] = True
+    return block
+
 
 def compute_flex_stack(df: pd.DataFrame) -> dict[str, Any]:
     """Tab 1: Cohort flex stack over time ($/kWh dual-price overlay).
@@ -403,18 +565,25 @@ def compute_price_response(df: pd.DataFrame) -> dict[str, Any]:
         "import": {"price": [], "power": []},
         "export": {"price": [], "power": []},
     }
+    df, privacy = apply_region_guardrail(df)
     if df.empty:
         return {
-            "regions": {r: empty_region for r in NEM_REGIONS},
+            "regions": {
+                r: _region_placeholder(empty_region, r, privacy) for r in NEM_REGIONS
+            },
             "price_unit": "$/kWh",
             "power_unit": "kW",
+            **privacy,
         }
 
-    result: dict[str, Any] = {"regions": {}, "price_unit": "$/kWh", "power_unit": "kW"}
-    for region in NEM_REGIONS:
+    result: dict[str, Any] = {
+        "regions": {}, "price_unit": "$/kWh", "power_unit": "kW", **privacy,
+    }
+    for region in REGION_ORDER:
         region_df = df[df["region"] == region]
         if region_df.empty:
-            result["regions"][region] = empty_region
+            if region in NEM_REGIONS:
+                result["regions"][region] = _region_placeholder(empty_region, region, privacy)
             continue
 
         importing = region_df[region_df["net_import_kw"] > 0]
@@ -480,6 +649,7 @@ def compute_curtailment_heatmap(df: pd.DataFrame) -> dict[str, Any]:
     which is the portion of net solar that exceeded the static cap regardless
     of battery/EV soak. This isolates the static-cap cost cleanly.
     """
+    df, privacy = apply_region_guardrail(df)
     if df.empty:
         return {
             "regions": [],
@@ -487,7 +657,10 @@ def compute_curtailment_heatmap(df: pd.DataFrame) -> dict[str, Any]:
             "curtailed_kwh": [],
             "curtailed_aud": [],
             "at_cap_share": [],
+            "total_curtailed_kwh": 0.0,
+            "total_curtailed_aud": 0.0,
             "price_unit": "$/kWh",
+            **privacy,
         }
 
     df = df.copy()
@@ -519,7 +692,7 @@ def compute_curtailment_heatmap(df: pd.DataFrame) -> dict[str, Any]:
 
     # Order rows by canonical NEM region order; only include regions present in data.
     present_regions = set(df["region"].unique().tolist())
-    regions = [r for r in NEM_REGIONS if r in present_regions]
+    regions = [r for r in REGION_ORDER if r in present_regions]
 
     def pivot_field(field: str, fill: float) -> list[list[float]]:
         pivot = grouped[field].unstack(fill_value=fill)
@@ -539,6 +712,7 @@ def compute_curtailment_heatmap(df: pd.DataFrame) -> dict[str, Any]:
         "total_curtailed_kwh": float(round(df["curtailed_kwh"].sum(), 3)),
         "total_curtailed_aud": float(round(df["curtailed_aud"].sum(), 2)),
         "price_unit": "$/kWh",
+        **privacy,
     }
 
 
@@ -592,31 +766,29 @@ def compute_counterfactual(df: pd.DataFrame) -> dict[str, Any]:
 
 def compute_buy_sell_spread(df: pd.DataFrame) -> dict[str, Any]:
     """Tab 5: Buy/sell price spread by region ($/kWh)."""
+    empty_region = {
+        "intervals": [],
+        "buy_price": [],
+        "sell_price": [],
+        "negative_fit_intervals": [],
+    }
+    df, privacy = apply_region_guardrail(df)
     if df.empty:
         return {
             "regions": {
-                r: {
-                    "intervals": [],
-                    "buy_price": [],
-                    "sell_price": [],
-                    "negative_fit_intervals": [],
-                }
-                for r in NEM_REGIONS
+                r: _region_placeholder(empty_region, r, privacy) for r in NEM_REGIONS
             },
             "price_unit": "$/kWh",
+            **privacy,
         }
 
-    result: dict[str, Any] = {"regions": {}, "price_unit": "$/kWh"}
+    result: dict[str, Any] = {"regions": {}, "price_unit": "$/kWh", **privacy}
 
-    for region in NEM_REGIONS:
+    for region in REGION_ORDER:
         region_df = df[df["region"] == region].copy()
         if region_df.empty:
-            result["regions"][region] = {
-                "intervals": [],
-                "buy_price": [],
-                "sell_price": [],
-                "negative_fit_intervals": [],
-            }
+            if region in NEM_REGIONS:
+                result["regions"][region] = _region_placeholder(empty_region, region, privacy)
             continue
 
         hourly = (
@@ -780,8 +952,12 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
     side). The grid_max_import/export_power shadows are also published as separate
     fields for completeness but are rarely non-zero on Mark's 30 kW envelope.
 
+    The switchboard-by-hour view is cohort-wide; the two region x hour
+    heatmaps are per-region and go through apply_region_guardrail (#22).
+
     Returns site/data/shadow_prices.json.
     """
+    guarded, privacy = apply_region_guardrail(df)
     empty = {
         "shadow_by_hour": {
             "hours": list(range(24)),
@@ -799,6 +975,7 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
             "export_shadow": [],
             "import_source": "shadow_load_forecast_price",
             "export_source": "shadow_solar_forecast_price",
+            **privacy,
         },
         "grid_envelope_shadow_heatmap": {
             "regions": [],
@@ -807,6 +984,7 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
             "export_shadow": [],
             "import_source": "shadow_envelope_import_price",
             "export_source": "shadow_envelope_export_price",
+            **privacy,
         },
         "price_unit": "$/kWh",
         "explainer": (
@@ -824,6 +1002,8 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
 
     df = df.copy()
     df["hour"] = df["interval_start_utc"].dt.hour
+    region_df = guarded.copy()
+    region_df["hour"] = region_df["interval_start_utc"].dt.hour
 
     # a) Shadow energy price distribution by hour (all $/kWh)
     shadow_by_hour: dict[str, Any] = {
@@ -862,11 +1042,11 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
         Returns ([], []) if the column is missing so the caller can decide
         whether to fall back to a zero-filled side.
         """
-        if col not in df.columns:
+        if col not in region_df.columns or region_df.empty:
             return [], []
-        series = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        series = pd.to_numeric(region_df[col], errors="coerce").fillna(0.0)
         pivot = (
-            series.groupby([df["region"], df["hour"]])
+            series.groupby([region_df["region"], region_df["hour"]])
             .median()
             .unstack(fill_value=0.0)
         )
@@ -891,6 +1071,7 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
             "export_shadow": [],
             "import_source": import_col,
             "export_source": export_col,
+            **privacy,
         }
 
         import_missing = import_col not in df.columns
@@ -913,7 +1094,7 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
 
         # Union across both sides, ordered by canonical NEM region order.
         seen = set(import_regions) | set(export_regions)
-        all_regions = [r for r in NEM_REGIONS if r in seen]
+        all_regions = [r for r in REGION_ORDER if r in seen]
         zero_row = [0.0] * 24
 
         def _row_for(r: str, regions: list[str], grid: list[list[float]]) -> list[float]:
@@ -961,6 +1142,7 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
 def compute_status(df: pd.DataFrame) -> dict[str, Any]:
     """Compute status metrics for the dashboard header and shields.io badges."""
     cohort_size = df["household_id"].nunique() if not df.empty else 0
+    _, privacy = apply_region_guardrail(df)
     total_intervals = len(df)
     total_savings = 0.0
 
@@ -981,6 +1163,14 @@ def compute_status(df: pd.DataFrame) -> dict[str, Any]:
         "last_updated": datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "regions": sorted(df["region"].unique().tolist()) if not df.empty else [],
         "schema_version": "2.0",
+        "k_anonymity": {
+            "k_min_region": K_MIN_REGION,
+            "k_min_prefix": K_MIN_PREFIX,
+            "k_advisory": K_ADVISORY,
+            "households_by_region": privacy["households"],
+            "suppressed_regions": privacy["suppressed_regions"],
+            "rolled_up_into": privacy["rolled_up_into"],
+        },
     }
 
 
@@ -1026,6 +1216,14 @@ def main() -> None:
 
     df = load_all_jsonl()
     _LOG.info("Total records after deduplication: %d", len(df))
+
+    _, privacy = apply_region_guardrail(df)
+    _LOG.info(
+        "k-anonymity: k_min_region=%d k_min_prefix=%d; households by region %s; "
+        "suppressed %s; rolled up into %s",
+        K_MIN_REGION, K_MIN_PREFIX, privacy["households"],
+        privacy["suppressed_regions"], privacy["rolled_up_into"],
+    )
 
     for resolution in ("5min", "hourly", "daily"):
         write_parquet_by_date(df, resolution)

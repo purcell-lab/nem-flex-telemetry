@@ -87,6 +87,7 @@
         <div class="bg-ink/50 rounded-lg p-4">
           <div class="text-xs text-paper/60 uppercase tracking-wide mb-1">Households</div>
           <div id="stat-cohort" class="text-2xl font-bold text-teal">--</div>
+          <div id="stat-cohort-note" class="text-xs text-paper/60 mt-1"></div>
         </div>
         <div class="bg-ink/50 rounded-lg p-4">
           <div class="text-xs text-paper/60 uppercase tracking-wide mb-1">Intervals reported</div>
@@ -426,6 +427,97 @@ function fmtAESTDateTime(d) {
 function utcHourToAEST(h) { return ((h + 10) % 24); }
 
 // ---------------------------------------------------------------------------
+// k-anonymity labelling (#22). Per-region payloads carry `households`
+// ({region: distinct households}), `suppressed_regions`, `rolled_up_into`,
+// `k_min_region` and `k_advisory`. Series below k_advisory are labelled as
+// individual data; suppressed regions show a notice instead of an empty chart.
+// Older payloads (and sample.json) lack these fields and render unlabelled.
+// ---------------------------------------------------------------------------
+const K_ADVISORY_DEFAULT = 5;
+const REGION_DISPLAY = { NEM: 'NEM (pooled regions)' };
+function regionName(r) { return REGION_DISPLAY[r] || r; }
+function kAdvisory(payload) { return (payload && payload.k_advisory) || K_ADVISORY_DEFAULT; }
+function householdCount(payload, region) {
+  const h = payload && payload.households;
+  return h && h[region] != null ? h[region] : null;
+}
+function householdLabel(n, kAdv) {
+  if (n == null) return '';
+  if (n === 1) return '1 household \u2014 individual data';
+  if (n < kAdv) return `${n} households \u2014 fewer than ${kAdv}, near-individual data`;
+  return `${n} households`;
+}
+function isSuppressed(payload, region) {
+  return !!(payload && (payload.suppressed_regions || []).includes(region));
+}
+function suppressionText(payload) {
+  const note = (payload && payload.suppression_note) || 'suppressed: fewer than k households';
+  const k = payload && payload.k_min_region;
+  return k ? `${note} (k = ${k})` : note;
+}
+// Notice rendered in place of a chart for a suppressed region (or view).
+function suppressedNotice(payload, region) {
+  const p = document.createElement('p');
+  p.className = 'text-ink/50 text-center py-12';
+  const pooled = payload && payload.rolled_up_into;
+  const sup = (payload && payload.suppressed_regions) || [];
+  const who = region ? regionName(region) : sup.join(', ');
+  p.textContent = `${who ? who + ': ' : ''}${suppressionText(payload)}.`
+    + (pooled ? ` Included in ${regionName(pooled)}.` : '');
+  return p;
+}
+// One-line caption above a chart listing small-n and suppressed regions.
+function privacyCaption(payload, regions) {
+  if (!payload) return null;
+  const kAdv = kAdvisory(payload);
+  const parts = [];
+  (regions || []).forEach(r => {
+    const n = householdCount(payload, r);
+    if (n != null && n < kAdv) parts.push(`${regionName(r)}: ${householdLabel(n, kAdv)}`);
+  });
+  const sup = payload.suppressed_regions || [];
+  if (sup.length) {
+    const pooled = payload.rolled_up_into;
+    parts.push(`${sup.join(', ')}: ${suppressionText(payload)}`
+      + (pooled ? `, pooled into ${regionName(pooled)}` : ''));
+  }
+  if (!parts.length) return null;
+  const p = document.createElement('p');
+  p.className = 'k-caption text-xs font-medium mb-2';
+  p.style.color = '#9A4F2E';
+  p.textContent = parts.join(' \u00b7 ');
+  return p;
+}
+// Region-axis tick label: region name plus household count when known.
+function regionTick(payload) {
+  return r => {
+    const n = householdCount(payload, r);
+    return n == null ? regionName(r) : `${regionName(r)} (n=${n})`;
+  };
+}
+function regionAxisMargin(payload, regions) {
+  const tick = regionTick(payload);
+  const longest = Math.max(0, ...regions.map(r => tick(r).length));
+  return Math.max(60, Math.ceil(longest * 6.5) + 36);
+}
+function mountChart(el, plot, caption) {
+  el.innerHTML = '';
+  if (caption) el.appendChild(caption);
+  el.appendChild(plot);
+}
+// Region selector buttons. Suppressed regions are labelled as such.
+const REGION_BTN_ON  = 'px-3 py-1 rounded-full text-sm font-medium border transition-all bg-teal text-white border-teal';
+const REGION_BTN_OFF = 'px-3 py-1 rounded-full text-sm font-medium border transition-all bg-white text-ink border-ink/20 hover:border-teal';
+function regionButtonLabel(payload, region) {
+  if (isSuppressed(payload, region)) return `${regionName(region)} (suppressed)`;
+  const n = householdCount(payload, region);
+  if (n != null && n < kAdvisory(payload)) {
+    return `${regionName(region)} \u00b7 ${n} household${n === 1 ? '' : 's'}`;
+  }
+  return regionName(region);
+}
+
+// ---------------------------------------------------------------------------
 // Tab switching
 // ---------------------------------------------------------------------------
 // Per-tab redraw callbacks. Charts in hidden tabs render with clientWidth=0,
@@ -536,6 +628,11 @@ async function loadData() {
 // ---------------------------------------------------------------------------
 function renderStats(status) {
   document.getElementById('stat-cohort').textContent = status.cohort_size ?? '--';
+  const kAdv = kAdvisory(status.k_anonymity);
+  const noteEl = document.getElementById('stat-cohort-note');
+  if (noteEl && status.cohort_size > 0 && status.cohort_size < kAdv) {
+    noteEl.textContent = `Fewer than ${kAdv}: regional views show individual household data`;
+  }
   document.getElementById('stat-intervals').textContent =
     status.total_intervals ? status.total_intervals.toLocaleString() : '--';
   document.getElementById('stat-savings').textContent =
@@ -649,7 +746,10 @@ function _hasPriceData(rd) {
 
 function renderPriceResponse(d) {
   _priceData = d;
-  const regions = Object.keys(d.regions).filter(r => _hasPriceData(d.regions[r]));
+  const regions = Object.keys(d.regions).filter(
+    r => _hasPriceData(d.regions[r]) || (d.regions[r] && d.regions[r].suppressed))
+    // Published series first so the default selection is never a suppressed region.
+    .sort((a, b) => (d.regions[a].suppressed ? 1 : 0) - (d.regions[b].suppressed ? 1 : 0));
   const selector = document.getElementById('region-selector');
   selector.innerHTML = '';
 
@@ -661,18 +761,15 @@ function renderPriceResponse(d) {
 
   regions.forEach((region, idx) => {
     const btn = document.createElement('button');
-    btn.textContent = region;
-    btn.className = `px-3 py-1 rounded-full text-sm font-medium border transition-all ${
-      idx === 0
-        ? 'bg-teal text-white border-teal'
-        : 'bg-white text-ink border-ink/20 hover:border-teal'
-    }`;
+    btn.textContent = regionButtonLabel(d, region);
+    btn.className = idx === 0 ? REGION_BTN_ON : REGION_BTN_OFF;
     btn.dataset.region = region;
     btn.addEventListener('click', () => {
       document.querySelectorAll('#region-selector button').forEach(b => {
-        b.className = 'px-3 py-1 rounded-full text-sm font-medium border transition-all bg-white text-ink border-ink/20 hover:border-teal';
+        b.className = REGION_BTN_OFF;
       });
-      btn.className = 'px-3 py-1 rounded-full text-sm font-medium border transition-all bg-teal text-white border-teal';
+      btn.className = REGION_BTN_ON;
+      _activeRegion = region;
       renderPriceRegion(region);
     });
     selector.appendChild(btn);
@@ -685,6 +782,11 @@ function renderPriceResponse(d) {
 function renderPriceRegion(region) {
   const el = document.getElementById('chart-price');
   const rd = _priceData.regions[region];
+  if (rd && rd.suppressed) {
+    el.innerHTML = '';
+    el.appendChild(suppressedNotice(_priceData, region));
+    return;
+  }
   if (!rd || !_hasPriceData(rd)) {
     el.innerHTML = `<p class="text-ink/40 text-center py-12">No data for ${region}.</p>`;
     return;
@@ -745,8 +847,7 @@ function renderPriceRegion(region) {
     },
     marks,
   });
-  el.innerHTML = '';
-  el.appendChild(plot);
+  mountChart(el, plot, privacyCaption(_priceData, [region]));
 }
 
 // ---------------------------------------------------------------------------
@@ -806,6 +907,11 @@ function drawCurtailmentHeatmap() {
   // Accept v0.6.0 `regions` schema; fall back to legacy `postcode_prefixes`
   // when a cached aggregator output is still on disk.
   const rows = d ? (d.regions || d.postcode_prefixes || []) : [];
+  if (d && rows.length === 0 && (d.suppressed_regions || []).length > 0) {
+    el.innerHTML = '';
+    el.appendChild(suppressedNotice(d, null));
+    return;
+  }
   if (!d || rows.length === 0) {
     el.innerHTML = '<p class="text-ink/40 text-center py-12">No data yet.</p>';
     return;
@@ -842,14 +948,14 @@ function drawCurtailmentHeatmap() {
   const plot = window.Plot.plot({
     width: el.parentElement.clientWidth - 32,
     height: Math.max(120, rows.length * 36 + 80),
-    marginLeft: 60,
+    marginLeft: regionAxisMargin(d, rows),
     x: {
       label: 'Hour of day (AEST)',
       domain: Array.from({length: 24}, (_, i) => i),
       ticks: [0,3,6,9,12,15,18,21],
       tickFormat: h => `${h}:00`,
     },
-    y: { label: 'NEM region', domain: rows },
+    y: { label: 'NEM region', domain: rows, tickFormat: regionTick(d) },
     color: {
       type: 'sequential', scheme: metric.scheme, domain: colorDomain,
       label: metric.label, legend: true,
@@ -859,12 +965,11 @@ function drawCurtailmentHeatmap() {
         x: 'hour_aest', y: 'region',
         fill: 'value',
         tip: true,
-        title: r => `${r.region} at ${r.hour_aest}:00 AEST: ${metric.fmt(r.value)}`,
+        title: r => `${regionName(r.region)} at ${r.hour_aest}:00 AEST: ${metric.fmt(r.value)}`,
       }),
     ]
   });
-  el.innerHTML = '';
-  el.appendChild(plot);
+  mountChart(el, plot, privacyCaption(d, rows));
 }
 
 // ---------------------------------------------------------------------------
@@ -909,7 +1014,10 @@ let _activeSpreadRegion = null;
 
 function renderBuySellSpread(d) {
   _spreadData = d;
-  const regions = Object.keys(d.regions).filter(r => d.regions[r].intervals.length > 0);
+  const regions = Object.keys(d.regions).filter(
+    r => d.regions[r].intervals.length > 0 || d.regions[r].suppressed)
+    // Published series first so the default selection is never a suppressed region.
+    .sort((a, b) => (d.regions[a].suppressed ? 1 : 0) - (d.regions[b].suppressed ? 1 : 0));
   const selector = document.getElementById('spread-region-selector');
   selector.innerHTML = '';
 
@@ -921,18 +1029,15 @@ function renderBuySellSpread(d) {
 
   regions.forEach((region, idx) => {
     const btn = document.createElement('button');
-    btn.textContent = region;
-    btn.className = `px-3 py-1 rounded-full text-sm font-medium border transition-all ${
-      idx === 0
-        ? 'bg-teal text-white border-teal'
-        : 'bg-white text-ink border-ink/20 hover:border-teal'
-    }`;
+    btn.textContent = regionButtonLabel(d, region);
+    btn.className = idx === 0 ? REGION_BTN_ON : REGION_BTN_OFF;
     btn.dataset.region = region;
     btn.addEventListener('click', () => {
       document.querySelectorAll('#spread-region-selector button').forEach(b => {
-        b.className = 'px-3 py-1 rounded-full text-sm font-medium border transition-all bg-white text-ink border-ink/20 hover:border-teal';
+        b.className = REGION_BTN_OFF;
       });
-      btn.className = 'px-3 py-1 rounded-full text-sm font-medium border transition-all bg-teal text-white border-teal';
+      btn.className = REGION_BTN_ON;
+      _activeSpreadRegion = region;
       renderSpreadRegion(region);
     });
     selector.appendChild(btn);
@@ -945,6 +1050,12 @@ function renderBuySellSpread(d) {
 function renderSpreadRegion(region) {
   const el = document.getElementById('chart-spread');
   const rd = _spreadData.regions[region];
+  if (rd && rd.suppressed) {
+    el.innerHTML = '';
+    el.appendChild(suppressedNotice(_spreadData, region));
+    document.getElementById('neg-fit-notice').classList.add('hidden');
+    return;
+  }
   if (!rd || rd.intervals.length === 0) {
     el.innerHTML = `<p class="text-ink/40 text-center py-12">No data for ${region}.</p>`;
     document.getElementById('neg-fit-notice').classList.add('hidden');
@@ -991,8 +1102,7 @@ function renderSpreadRegion(region) {
     color: { domain: ['Buy price', 'Export price'], range: [TEAL, GOLD], legend: true },
     marks,
   });
-  el.innerHTML = '';
-  el.appendChild(plot);
+  mountChart(el, plot, privacyCaption(_spreadData, [region]));
 
   // Negative FiT notice
   const notice = document.getElementById('neg-fit-notice');
@@ -1147,9 +1257,14 @@ function renderShadowByHour(d) {
 // ---------------------------------------------------------------------------
 // Chart j: Envelope shadow heatmap (NEM region x hour-of-day, $/kWh)
 // ---------------------------------------------------------------------------
-function renderShadowHeatmap(elId, grid, regions, labelField) {
+function renderShadowHeatmap(elId, grid, regions, labelField, hm) {
   const el = document.getElementById(elId);
   if (!el) return;
+  if ((!regions || regions.length === 0) && hm && (hm.suppressed_regions || []).length > 0) {
+    el.innerHTML = '';
+    el.appendChild(suppressedNotice(hm, null));
+    return;
+  }
   if (!grid || !regions || regions.length === 0) {
     el.innerHTML = '<p class="text-ink/40 text-center py-8">No envelope shadow data yet.</p>';
     return;
@@ -1168,9 +1283,9 @@ function renderShadowHeatmap(elId, grid, regions, labelField) {
   const plot = window.Plot.plot({
     width: el.parentElement.clientWidth - 32,
     height: Math.max(100, regions.length * 36 + 60),
-    marginLeft: 60,
+    marginLeft: regionAxisMargin(hm, regions),
     x: { label: 'Hour of day (AEST)', domain: Array.from({length: 24}, (_, i) => i), ticks: [0,3,6,9,12,15,18,21], tickFormat: h => `${h}:00` },
-    y: { label: 'NEM region', domain: regions },
+    y: { label: 'NEM region', domain: regions, tickFormat: regionTick(hm) },
     color: {
       type: 'diverging',
       scheme: 'RdBu',
@@ -1186,13 +1301,12 @@ function renderShadowHeatmap(elId, grid, regions, labelField) {
         fill: 'shadow',
         tip: true,
         title: r => r.shadow == null
-          ? `${r.region} at ${r.hour_aest}:00 AEST: n/a`
-          : `${r.region} at ${r.hour_aest}:00 AEST: $${r.shadow.toFixed(5)}/kWh`,
+          ? `${regionName(r.region)} at ${r.hour_aest}:00 AEST: n/a`
+          : `${regionName(r.region)} at ${r.hour_aest}:00 AEST: $${r.shadow.toFixed(5)}/kWh`,
       }),
     ]
   });
-  el.innerHTML = '';
-  el.appendChild(plot);
+  mountChart(el, plot, privacyCaption(hm, regions));
 }
 
 function renderShadowPrices(shadowPrices) {
@@ -1205,8 +1319,8 @@ function renderShadowPrices(shadowPrices) {
     // v0.6.0 emits `regions`; older cached payloads may still carry
     // `postcode_prefixes`. Accept both so a stale fallback renders.
     const rows = hm.regions || hm.postcode_prefixes || [];
-    renderShadowHeatmap('chart-shadow-import-heat', hm.import_shadow, rows, 'import');
-    renderShadowHeatmap('chart-shadow-export-heat', hm.export_shadow, rows, 'export');
+    renderShadowHeatmap('chart-shadow-import-heat', hm.import_shadow, rows, 'import', hm);
+    renderShadowHeatmap('chart-shadow-export-heat', hm.export_shadow, rows, 'export', hm);
   }
 }
 
