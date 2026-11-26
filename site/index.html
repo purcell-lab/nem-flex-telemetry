@@ -93,7 +93,7 @@
           <div id="stat-intervals" class="text-2xl font-bold text-gold">--</div>
         </div>
         <div class="bg-ink/50 rounded-lg p-4">
-          <div class="text-xs text-paper/60 uppercase tracking-wide mb-1">Counterfactual savings</div>
+          <div class="text-xs text-paper/60 uppercase tracking-wide mb-1">Grid import offset value</div>
           <div id="stat-savings" class="text-2xl font-bold text-rust">$--</div>
         </div>
         <div class="bg-ink/50 rounded-lg p-4">
@@ -205,17 +205,18 @@
       <div class="mb-4">
         <h2 class="text-xl font-semibold text-ink mb-1">Counterfactual ledger</h2>
         <p class="text-sm text-ink/60">
-          Cumulative demand flexibility savings in AUD from battery and EV dispatch shaping vs. the same household running with setpoint at zero.
+          Cumulative value, in AUD, of grid import offset by solar, battery and EV: <code>(naive_baseline_kw - net_import_kw) &times; price</code>, where the baseline is the household's house load (the <code>subtraction</code> method).
+          This is not the effect of shifting flexible load alone, and it is not a comparison with the same household running at zero setpoint: solar generation counts towards it.
           The formula is asymmetric: net-importing intervals use the buy price ($/kWh), net-exporting use the export price, so negative feed-in periods are accounted for correctly.
-          Caveat: the baseline currently uses realised total_load_kw, so optimiser-driven load shifting (hot water, EV start time, etc.) shows as zero saving. The number reported here is therefore a lower bound.
+          Caveat: house load comes from optimiser entities on some installs (<a class="underline" href="https://github.com/purcell-lab/nem-flex-telemetry/issues/20">#20</a>), so a mis-mapped house load (for example 0 kW) shows as a negative value.
         </p>
       </div>
 
       <!-- Prominent total -->
       <div class="bg-ink rounded-xl p-6 mb-6 text-center">
-        <div class="text-xs text-paper/60 uppercase tracking-widest mb-2">Total counterfactual savings</div>
+        <div class="text-xs text-paper/60 uppercase tracking-widest mb-2">Total value of grid import offset</div>
         <div id="total-savings-display" class="font-display text-5xl font-bold text-gold mb-1">$--</div>
-        <div class="text-sm text-paper/50">Across cohort, since data collection began</div>
+        <div class="text-sm text-paper/50">Solar, battery and EV, across cohort, since data collection began</div>
       </div>
 
       <div class="bg-white rounded-xl p-4 shadow-sm border border-ink/10">
@@ -405,16 +406,30 @@ const _fmtHourMin = new Intl.DateTimeFormat('en-AU', {
   timeZone: BRIS_TZ, hour: '2-digit', minute: '2-digit', hour12: false,
 });
 
-// Plot tick formatter for time axes: shows date label at midnight Brisbane,
-// hour label otherwise. Brisbane is UTC+10 with no DST, so this is stable.
-function tickAEST(d) {
+// Plot tick formatter for time axes. Plot passes (value, index, ticks), so
+// the format is chosen from the tick spacing: ticks a day or more apart get
+// a date label, closer ticks get an hour label (with the date at Brisbane
+// midnight). Long-range ticks fall on UTC midnight, which is 10 am in
+// Brisbane, so testing for Brisbane midnight alone printed "10 am" on every
+// tick of a multi-month axis (#23). Brisbane is UTC+10 with no DST.
+const DAY_MS = 24 * 3600 * 1000;
+function tickAEST(d, i, ticks) {
   if (!(d instanceof Date)) d = new Date(d);
-  // Get Brisbane hour (0..23)
+  if (Array.isArray(ticks) && ticks.length > 1) {
+    const step = Math.abs(new Date(ticks[1]) - new Date(ticks[0]));
+    if (step >= DAY_MS) return _fmtDate.format(d);
+  }
   const parts = _fmtHourMin.formatToParts(d);
   const hh = parts.find(p => p.type === 'hour')?.value || '00';
   const mm = parts.find(p => p.type === 'minute')?.value || '00';
   if (hh === '00' && mm === '00') return _fmtDate.format(d);
   return _fmtTime.format(d);
+}
+// Tick-count hint for time axes: about one label per 110 px, so date
+// labels do not collide on long ranges or narrow screens.
+function timeTickCount(el) {
+  const w = (el && el.parentElement ? el.parentElement.clientWidth : window.innerWidth) || 600;
+  return Math.max(3, Math.min(12, Math.floor(w / 110)));
 }
 function fmtAESTDateTime(d) {
   if (!(d instanceof Date)) d = new Date(d);
@@ -542,10 +557,24 @@ function renderStats(status) {
     status.total_savings_aud != null
       ? `$${status.total_savings_aud.toLocaleString('en-AU', { minimumFractionDigits: 2 })}`
       : '$--';
-  document.getElementById('stat-updated').textContent =
-    status.last_updated
-      ? new Date(status.last_updated).toLocaleString('en-AU', { timeZone: 'Australia/Brisbane', dateStyle: 'short', timeStyle: 'short' })
-      : '--';
+  const updatedEl = document.getElementById('stat-updated');
+  if (status.last_updated) {
+    const updated = new Date(status.last_updated);
+    updatedEl.textContent = `${fmtAge(updated)} (${updated.toLocaleString('en-AU', { timeZone: 'Australia/Brisbane', dateStyle: 'short', timeStyle: 'short' })})`;
+    updatedEl.title = `${fmtAESTDateTime(updated)}. Aggregation runs on each telemetry push, with an hourly backstop.`;
+  } else {
+    updatedEl.textContent = '--';
+  }
+}
+
+// "updated 3 h ago" style data age, so a delayed aggregation run is visible.
+function fmtAge(d) {
+  const mins = Math.max(0, Math.round((Date.now() - d.getTime()) / 60000));
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 48) return `${hours} h ago`;
+  return `${Math.round(hours / 24)} days ago`;
 }
 
 // ---------------------------------------------------------------------------
@@ -593,7 +622,7 @@ function renderFlexStack(d) {
     width: el.parentElement.clientWidth - 32,
     height: 360,
     marginRight: 80,
-    x: { type: 'utc', label: 'Time (AEST)', tickFormat: tickAEST },
+    x: { type: 'utc', label: 'Time (AEST)', tickFormat: tickAEST, ticks: timeTickCount(el) },
     y: { label: 'kW (cohort total)        Right: price ($/kWh)', grid: true, domain: [0, kwMax * 1.05] },
     color: {
       domain: ['Flex up', 'Flex down', 'Buy price', 'Sell price'],
@@ -888,12 +917,12 @@ function renderCounterfactual(d) {
   const plot = window.Plot.plot({
     width: el.parentElement.clientWidth - 32,
     height: 340,
-    x: { type: 'utc', label: 'Time (AEST)', tickFormat: tickAEST },
-    y: { label: 'Cumulative savings (AUD)', grid: true },
+    x: { type: 'utc', label: 'Time (AEST)', tickFormat: tickAEST, ticks: timeTickCount(el) },
+    y: { label: 'Cumulative value of import offset (AUD)', grid: true },
     marks: [
       window.Plot.areaY(cumData, { x: 't', y: 'v', fill: GOLD, fillOpacity: 0.3 }),
       window.Plot.lineY(cumData, { x: 't', y: 'v', stroke: GOLD, strokeWidth: 2.5, tip: true,
-        title: r => r.v == null ? 'no data' : `${fmtAESTDateTime(r.t)}\nCumulative savings: $${r.v.toFixed(2)}` }),
+        title: r => r.v == null ? 'no data' : `${fmtAESTDateTime(r.t)}\nCumulative value: $${r.v.toFixed(2)}` }),
       window.Plot.ruleY([0], { stroke: INK, strokeOpacity: 0.2 }),
     ]
   });
@@ -986,7 +1015,7 @@ function renderSpreadRegion(region) {
     width: el.parentElement.clientWidth - 32,
     height: 340,
     marginRight: 16,
-    x: { type: 'utc', label: 'Time (AEST)', tickFormat: tickAEST },
+    x: { type: 'utc', label: 'Time (AEST)', tickFormat: tickAEST, ticks: timeTickCount(el) },
     y: { label: 'Price ($/kWh)', grid: true },
     color: { domain: ['Buy price', 'Export price'], range: [TEAL, GOLD], legend: true },
     marks,
@@ -1057,7 +1086,7 @@ function renderV2gDuty(d) {
   const plot = window.Plot.plot({
     width: el.parentElement.clientWidth - 32,
     height: 200,
-    x: { type: 'utc', label: 'Time (AEST)', tickFormat: tickAEST },
+    x: { type: 'utc', label: 'Time (AEST)', tickFormat: tickAEST, ticks: timeTickCount(el) },
     y: { label: '% EVs', domain: [0, 100] },
     color: { domain: states, range: colours, legend: true },
     marks: [
@@ -1088,7 +1117,7 @@ function renderV2gDispatch(d) {
   const plot = window.Plot.plot({
     width: el.parentElement.clientWidth - 32,
     height: 280,
-    x: { type: 'utc', label: 'Time (AEST)', tickFormat: tickAEST },
+    x: { type: 'utc', label: 'Time (AEST)', tickFormat: tickAEST, ticks: timeTickCount(el) },
     y: { label: 'Setpoint (kW, + = charging, - = discharging)', grid: true },
     marks: [
       window.Plot.areaY(battData, { x: 't', y: 'v', fill: TEAL, fillOpacity: 0.4, tip: true,
