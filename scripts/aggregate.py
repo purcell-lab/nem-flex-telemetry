@@ -13,6 +13,7 @@ validates them against the JSON Schema (v2.0), deduplicates, and writes:
   - site/data/buy_sell_spread.json     (tab 5: buy/sell price spread by region)
   - site/data/assets_summary.json      (tab 6: asset mix, V2G duty cycle, dispatch share)
   - site/data/shadow_prices.json       (tab 7: shadow price distribution and envelope heatmap)
+  - site/data/power_balance.json       (data quality: power-balance residual, #20)
   - site/data/status.json              (dashboard header stats)
 
 Counterfactual formula (schema v2.0, $/kWh throughout):
@@ -32,6 +33,7 @@ Dependencies:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -72,6 +74,26 @@ INTERVAL_SECONDS = 300
 # |shadow_energy_price| above this ($/kWh) is counted as a constraint-bound
 # interval: beyond the market-price window, so a penalty-driven dual (#30).
 SHADOW_BOUND_THRESHOLD = 2.0
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float threshold from the environment, falling back on bad input."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        _LOG.warning("Ignoring non-numeric %s=%r; using %s", name, raw, default)
+        return default
+
+
+# Power-balance data-quality check (#20), both in kW. A household is flagged
+# when its mean |residual| exceeds POWER_BALANCE_RESIDUAL_KW. The per-interval
+# POWER_BALANCE_INTERVAL_KW drives the share_over_threshold stat. Override with
+# the NEM_FLEX_-prefixed environment variables of the same name.
+POWER_BALANCE_RESIDUAL_KW = _env_float("NEM_FLEX_POWER_BALANCE_RESIDUAL_KW", 1.0)
+POWER_BALANCE_INTERVAL_KW = _env_float("NEM_FLEX_POWER_BALANCE_INTERVAL_KW", 1.0)
 
 # Publisher household-ID aliasing.
 #
@@ -955,11 +977,231 @@ def compute_shadow_prices(df: pd.DataFrame) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Data quality: power-balance check (#20)
+# ---------------------------------------------------------------------------
+
+def power_balance_residual(df: pd.DataFrame) -> pd.Series:
+    """Per-record power-balance residual in kW (#20).
+
+    Sign conventions are from SCHEMA.md (schema v2.0):
+      - net_import_kw: positive = importing, negative = exporting
+      - solar_kw, house_load_kw, deferrable_load_kw: >= 0
+      - assets[].setpoint_kw: positive = charging, negative = discharging
+
+    Supply at the switchboard is grid import plus solar; demand is house load,
+    deferrable load and asset charging (discharging is negative demand). So:
+
+        residual_kw = (net_import_kw + solar_kw)
+                      - (house_load_kw + deferrable_load_kw + sum(assets[].setpoint_kw))
+
+    A closed balance gives a residual of ~0. Positive means more supply than
+    the recorded demand explains (e.g. a house load mapped to 0 kW). The
+    formula quoted in #20 adds the setpoints; with the schema's
+    positive = charging convention they must be subtracted.
+
+    A null setpoint_kw (entity unavailable) counts as 0 kW.
+    """
+    if df.empty:
+        return pd.Series(dtype=float)
+
+    def _col(name: str) -> pd.Series:
+        return pd.to_numeric(df[name], errors="coerce").fillna(0.0)
+
+    supply = _col("net_import_kw") + _col("solar_kw")
+    demand = _col("house_load_kw") + _col("deferrable_load_kw") + asset_setpoint_total(df)
+    return supply - demand
+
+
+def asset_setpoint_total(df: pd.DataFrame) -> pd.Series:
+    """Per-record sum of assets[].setpoint_kw (kW); null setpoints count as 0."""
+    if df.empty or "assets" not in df.columns:
+        return pd.Series(0.0, index=df.index, dtype=float)
+
+    def _setpoint_sum(assets: Any) -> float:
+        if not isinstance(assets, list):
+            return 0.0
+        total = 0.0
+        for asset in assets:
+            sp = asset.get("setpoint_kw") if isinstance(asset, dict) else None
+            if sp is not None:
+                total += float(sp)
+        return total
+
+    return df["assets"].map(_setpoint_sum).astype(float)
+
+
+def _balance_stats(
+    residual: pd.Series, house_load: pd.Series, setpoints: pd.Series
+) -> dict[str, Any]:
+    """Summary stats for a set of per-interval residuals (kW).
+
+    ``mean_abs_residual_if_setpoint_inverted_kw`` is a diagnostic only: the
+    mean |residual| if setpoint_kw used positive = discharging instead of the
+    SCHEMA.md convention. A much smaller value than mean_abs_residual_kw
+    suggests the publisher's setpoint sign is inverted.
+    """
+    abs_res = residual.abs()
+    n = len(residual)
+    if n == 0:
+        return {
+            "intervals": 0,
+            "mean_residual_kw": None,
+            "mean_abs_residual_kw": None,
+            "p90_abs_residual_kw": None,
+            "share_over_threshold": None,
+            "zero_house_load_intervals": 0,
+            "mean_abs_residual_if_setpoint_inverted_kw": None,
+        }
+    inverted = residual + 2.0 * setpoints
+    return {
+        "intervals": int(n),
+        "mean_residual_kw": round(float(residual.mean()), 3),
+        "mean_abs_residual_kw": round(float(abs_res.mean()), 3),
+        "p90_abs_residual_kw": round(float(abs_res.quantile(0.9)), 3),
+        "share_over_threshold": round(float((abs_res > POWER_BALANCE_INTERVAL_KW).mean()), 4),
+        "zero_house_load_intervals": int((house_load == 0).sum()),
+        "mean_abs_residual_if_setpoint_inverted_kw": round(float(inverted.abs().mean()), 3),
+    }
+
+
+def household_power_balance(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-household power-balance stats and flag (internal only).
+
+    Indexed by household_id, so this frame must never be written to a public
+    output. Columns: region, intervals, mean_residual_kw, mean_abs_residual_kw,
+    p90_abs_residual_kw, share_over_threshold, zero_house_load_intervals,
+    mean_abs_residual_if_setpoint_inverted_kw, flagged. A household is flagged when its mean |residual| exceeds
+    POWER_BALANCE_RESIDUAL_KW.
+    """
+    columns = [
+        "region", "intervals", "mean_residual_kw", "mean_abs_residual_kw",
+        "p90_abs_residual_kw", "share_over_threshold",
+        "zero_house_load_intervals", "mean_abs_residual_if_setpoint_inverted_kw",
+        "flagged",
+    ]
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    residual = power_balance_residual(df)
+    house_load = pd.to_numeric(df["house_load_kw"], errors="coerce")
+    setpoints = asset_setpoint_total(df)
+    rows: dict[str, dict[str, Any]] = {}
+    for household_id, idx in df.groupby("household_id").groups.items():
+        stats = _balance_stats(residual.loc[idx], house_load.loc[idx], setpoints.loc[idx])
+        stats["region"] = df.loc[idx, "region"].mode().iat[0]
+        stats["flagged"] = bool(
+            stats["mean_abs_residual_kw"] is not None
+            and stats["mean_abs_residual_kw"] > POWER_BALANCE_RESIDUAL_KW
+        )
+        rows[household_id] = stats
+    return pd.DataFrame.from_dict(rows, orient="index")[columns]
+
+
+def _household_tag(household_id: str) -> str:
+    """Short hash for log lines, which are public in CI (docs/PRIVACY.md)."""
+    return hashlib.sha256(household_id.encode()).hexdigest()[:8]
+
+
+def compute_power_balance(
+    df: pd.DataFrame, households: pd.DataFrame | None = None
+) -> dict[str, Any]:
+    """Data quality: power-balance residual check (#20).
+
+    See power_balance_residual() for the formula. Published at cohort and NEM
+    region level only; household IDs are never written out (docs/PRIVACY.md).
+    Flagged households are logged as a short hash plus region.
+
+    Flagged households are NOT excluded from any other view yet; that is a
+    separate decision (#20, #23).
+
+    Returns site/data/power_balance.json.
+    """
+    if households is None:
+        households = household_power_balance(df)
+
+    empty_series = pd.Series(dtype=float)
+    result: dict[str, Any] = {
+        "formula": (
+            "residual_kw = (net_import_kw + solar_kw) - (house_load_kw + "
+            "deferrable_load_kw + sum(assets[].setpoint_kw))"
+        ),
+        "sign_convention": (
+            "net_import_kw positive = importing; setpoint_kw positive = charging. "
+            "Positive residual = more supply than the recorded demand explains."
+        ),
+        "diagnostic": (
+            "mean_abs_residual_if_setpoint_inverted_kw recomputes the residual with "
+            "setpoint_kw read as positive = discharging. If it is much smaller than "
+            "mean_abs_residual_kw, the published setpoint sign likely disagrees with SCHEMA.md."
+        ),
+        "flag_rule": "household mean |residual_kw| > thresholds.mean_abs_residual_kw",
+        "thresholds": {
+            "mean_abs_residual_kw": POWER_BALANCE_RESIDUAL_KW,
+            "interval_abs_residual_kw": POWER_BALANCE_INTERVAL_KW,
+        },
+        "unit": "kW",
+        "cohort": {
+            "households": 0,
+            "flagged": 0,
+            **_balance_stats(empty_series, empty_series, empty_series),
+        },
+        "regions": {},
+    }
+    if df.empty:
+        return result
+
+    residual = power_balance_residual(df)
+    house_load = pd.to_numeric(df["house_load_kw"], errors="coerce")
+    setpoints = asset_setpoint_total(df)
+
+    result["cohort"] = {
+        "households": int(len(households)),
+        "flagged": int(households["flagged"].sum()),
+        **_balance_stats(residual, house_load, setpoints),
+    }
+    for region in NEM_REGIONS:
+        mask = df["region"] == region
+        if not mask.any():
+            continue
+        region_households = households[households["region"] == region]
+        result["regions"][region] = {
+            "households": int(len(region_households)),
+            "flagged": int(region_households["flagged"].sum()),
+            **_balance_stats(residual[mask], house_load[mask], setpoints[mask]),
+        }
+
+    for household_id, row in households[households["flagged"]].iterrows():
+        _LOG.warning(
+            "Power balance: household %s (%s) flagged: mean |residual| %.2f kW > %.2f kW, "
+            "p90 |residual| %.2f kW, %d intervals with house_load_kw == 0, "
+            "mean |residual| with setpoint sign inverted %.2f kW",
+            _household_tag(str(household_id)),
+            row["region"],
+            row["mean_abs_residual_kw"],
+            POWER_BALANCE_RESIDUAL_KW,
+            row["p90_abs_residual_kw"],
+            row["zero_house_load_intervals"],
+            row["mean_abs_residual_if_setpoint_inverted_kw"],
+        )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Status JSON
 # ---------------------------------------------------------------------------
 
-def compute_status(df: pd.DataFrame) -> dict[str, Any]:
-    """Compute status metrics for the dashboard header and shields.io badges."""
+def compute_status(
+    df: pd.DataFrame, households: pd.DataFrame | None = None
+) -> dict[str, Any]:
+    """Compute status metrics for the dashboard header and shields.io badges.
+
+    ``households`` is the household_power_balance() frame; computed here if
+    not supplied.
+    """
+    if households is None:
+        households = household_power_balance(df)
+    power_balance_flagged = int(households["flagged"].sum()) if not households.empty else 0
     cohort_size = df["household_id"].nunique() if not df.empty else 0
     total_intervals = len(df)
     total_savings = 0.0
@@ -981,6 +1223,7 @@ def compute_status(df: pd.DataFrame) -> dict[str, Any]:
         "last_updated": datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "regions": sorted(df["region"].unique().tolist()) if not df.empty else [],
         "schema_version": "2.0",
+        "power_balance_flagged": power_balance_flagged,
     }
 
 
@@ -1036,6 +1279,8 @@ def main() -> None:
 
     SITE_DATA.mkdir(parents=True, exist_ok=True)
 
+    households_balance = household_power_balance(df)
+
     views = {
         "cohort_flex_stack.json": compute_flex_stack(df),
         "price_response.json": compute_price_response(df),
@@ -1044,7 +1289,8 @@ def main() -> None:
         "buy_sell_spread.json": compute_buy_sell_spread(df),
         "assets_summary.json": compute_assets_summary(df, assets_df),
         "shadow_prices.json": compute_shadow_prices(df),
-        "status.json": compute_status(df),
+        "power_balance.json": compute_power_balance(df, households_balance),
+        "status.json": compute_status(df, households_balance),
     }
 
     for filename, data in views.items():

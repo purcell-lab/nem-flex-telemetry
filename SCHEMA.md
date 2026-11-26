@@ -183,6 +183,34 @@ The aggregation action produces:
 - `data/cohort/daily/YYYY/MM/DD.parquet`: daily summaries
 - `site/data/assets_summary.json`: asset mix, V2G duty cycle, dispatch share (dashboard tab 6)
 - `site/data/shadow_prices.json`: shadow price distributions and envelope heatmap (dashboard tab 7)
+- `site/data/power_balance.json`: power-balance data-quality check (see below)
+
+---
+
+## Data quality checks
+
+### Power balance (#20)
+
+Every record should close a power balance at the switchboard. With the sign conventions above (`net_import_kw` positive = importing, `setpoint_kw` positive = charging), the aggregator computes a per-interval residual:
+
+```
+residual_kw = (net_import_kw + solar_kw)
+            - (house_load_kw + deferrable_load_kw + sum(assets[].setpoint_kw))
+```
+
+A null `setpoint_kw` counts as 0 kW. A positive residual means more supply than the recorded demand explains, for example a house load mapped to 0 kW.
+
+For each household the aggregator computes the mean residual, mean and p90 |residual|, the share of intervals with |residual| above `POWER_BALANCE_INTERVAL_KW`, and the number of intervals with `house_load_kw == 0`. A household is **flagged** when its mean |residual| exceeds `POWER_BALANCE_RESIDUAL_KW`. Both thresholds default to 1.0 kW. You can override them with the `NEM_FLEX_POWER_BALANCE_RESIDUAL_KW` and `NEM_FLEX_POWER_BALANCE_INTERVAL_KW` environment variables.
+
+As a diagnostic, `mean_abs_residual_if_setpoint_inverted_kw` repeats the calculation with `setpoint_kw` read as positive = discharging. If it is much smaller than `mean_abs_residual_kw`, the publisher's setpoint sign probably disagrees with this schema.
+
+Outputs:
+
+- `site/data/power_balance.json`: the same stats at cohort and NEM-region level, with counts of households and flagged households. No household IDs are published (see [docs/PRIVACY.md](docs/PRIVACY.md)).
+- `site/data/status.json`: `power_balance_flagged`, the number of flagged households.
+- Aggregator log: one warning per flagged household, naming its region and a short hash of its ID.
+
+The flag is informational only. Flagged households are still included in every other view.
 
 ---
 
